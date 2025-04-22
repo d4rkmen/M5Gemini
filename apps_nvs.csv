@@ -1,0 +1,32 @@
+# M5Apps NVS file
+key,type,encoding,value
+system,namespace,,
+brightness,data,i32,100
+volume,data,i32,70
+boot_sound,data,u8,1
+wifi,namespace,,
+enabled,data,u8,0
+ssid,data,string,""
+pass,data,string,""
+static_ip,data,u8,0
+ip,data,string,"192.168.1.100"
+mask,data,string,"255.255.255.0"
+gw,data,string,"192.168.1.1"
+dns,data,string,"8.8.8.8"
+gemini,namespace,,
+api_key,data,string,""
+model,data,string,"gemini-2.0-flash"
+rules,data,string,"you are conversational AI assistant with STT and TTS features running on M5 Cardputer the ESP32-S3 device. your name is Cardputer. always answer using ASCII characters only. limit your response to 800 tokens. give short direct and a quite funny answer to the question. start your answer with something like: 'yes, master', 'your wish is my command' and so on"
+elevenlabs,namespace,,
+enabled,data,u8,0
+volume,data,i32,255
+api_key,data,string,""
+model,data,string,"eleven_multilingual_v2"
+voice,data,string,"0sGQQaD2G2X1s87kHM5b"
+deepgram,namespace,,
+enabled,data,u8,0
+sensetivity,data,i32,2
+api_key,data,string,""
+smart_format,data,u8,1
+model,data,string,"nova-3"
+endpointing,data,i32,600
