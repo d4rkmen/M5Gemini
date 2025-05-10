@@ -19,6 +19,7 @@ static const char* HINT_GROUPS = HINT_ITEMS;
 // Scroll constants
 #define DESC_SCROLL_PAUSE 1000
 #define DESC_SCROLL_SPEED 20
+#define EDIT_STRING_DIALOG_MAX_LENGTH 4000
 
 #define HINT_HEIGHT 12
 #define ITEMS_Y_OFFSET 20
@@ -676,7 +677,11 @@ namespace UTILS
                     {
                         std::string value = item.value;
                         bool is_password = (item.key == "pass");
-                        if (UTILS::UI::show_edit_string_dialog(hal, item.label, value, is_password, 50))
+                        if (UTILS::UI::show_edit_string_dialog(hal,
+                                                               item.label,
+                                                               value,
+                                                               is_password,
+                                                               EDIT_STRING_DIALOG_MAX_LENGTH))
                         {
                             item.value = value;
                             value_changed = true;
