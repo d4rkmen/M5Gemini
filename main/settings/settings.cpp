@@ -139,7 +139,16 @@ namespace SETTINGS
              "nova-3",
              "",
              "nova-3;nova-2;nova;enhanced;base",
+             "",
              "The STT model to use. Hold [Fn] to enter custom (nova-2-phonecall etc.)"},
+            {"language",
+             "Language",
+             TYPE_STRING,
+             "multi",
+             "",
+             "multi;en;nl",
+             "",
+             "Speech recognition language: multi (multilingual), en (English), nl (Dutch)"},
         };
 
         SettingGroup_t export_group;

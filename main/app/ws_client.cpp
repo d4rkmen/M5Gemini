@@ -39,7 +39,7 @@ std::string get_transcript(void)
 static const char* TAG = "WS_CLIENT";
 #define DEEPGRAM_BASE_URL                                                                                                      \
     "wss://api.deepgram.com/v1/"                                                                                               \
-    "listen?model={}&language=en-US&channels=1&encoding=linear16&sample_rate=8000&interim_results=true&endpointing={}&smart_"  \
+    "listen?model={}&language={}&channels=1&encoding=linear16&sample_rate=8000&interim_results=true&endpointing={}&smart_"  \
     "format={}"
 // "&utterance_end_ms=1000&vad_events=false"
 
@@ -366,9 +366,21 @@ bool deepgram_streaming_start(HAL::Hal* hal, EventGroupHandle_t control_event_gr
                              STT_RECORD_START_REQUEST_BIT | STT_RECORD_STOP_REQUEST_BIT | STT_TRANSCRIPT_BIT |
                              STT_STREAM_ERROR_BIT);
     std::string model = hal->settings()->getString("deepgram", "model");
+    std::string language_setting = hal->settings()->getString("deepgram", "language");
     int32_t endpointing = hal->settings()->getNumber("deepgram", "endpointing");
     bool smart_format = hal->settings()->getBool("deepgram", "smart_format");
-    std::string url = std::format(DEEPGRAM_BASE_URL, model, endpointing, smart_format ? "true" : "false");
+    
+    // Map language setting to API parameter
+    std::string language_param = language_setting;
+    if (language_setting == "en") {
+        language_param = "en-US";
+    } else if (language_setting == "nl") {
+        language_param = "nl";
+    } else if (language_setting == "multi") {
+        language_param = "multi";
+    }
+    
+    std::string url = std::format(DEEPGRAM_BASE_URL, model, language_param, endpointing, smart_format ? "true" : "false");
     std::string api_key = hal->settings()->getString("deepgram", "api_key");
     // Use the global static context
     memset(&deepgram_context, 0, sizeof(deepgram_context_t));

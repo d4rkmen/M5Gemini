@@ -22,3 +22,4 @@ deepgram-sensetivity=2
 deepgram-api_key=YOUR_DEEPGRAM_API_KEY
 deepgram-endpointing=600
 deepgram-model=nova-3
+deepgram-language=multi
