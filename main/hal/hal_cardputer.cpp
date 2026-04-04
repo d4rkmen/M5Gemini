@@ -15,6 +15,7 @@
 #include "display/display.hpp"
 #endif
 #include "esp_log.h"
+#include "driver/gpio.h"
 
 static const char* TAG = "HAL";
 
@@ -211,6 +212,20 @@ void HalCardputer::init()
 #if HAL_USE_BAT
     _init_bat();
 #endif
+    // CardPuter ADV has SX1262 radio sharing SPI2 with SD card;
+    // deselect its CS so it doesn't drive MISO during SD transactions
+    if (_board_type == BoardType::CARDPUTER_ADV)
+    {
+        gpio_config_t io_conf = {};
+        io_conf.pin_bit_mask = (1ULL << GPIO_NUM_5);
+        io_conf.mode = GPIO_MODE_OUTPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io_conf);
+        gpio_set_level(GPIO_NUM_5, 1);
+    }
+
 #if HAL_USE_SDCARD
     _init_sdcard();
 #endif
