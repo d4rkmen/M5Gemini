@@ -9,9 +9,10 @@
  *
  */
 #include "hal_cardputer.h"
-#include "app/utils/common_define.h"
-#ifdef HAVE_BATTERY
-#include "bat/adc_read.h"
+#include "hal_config.h"
+#include "common_define.h"
+#if HAL_USE_DISPLAY
+#include "display/display.hpp"
 #endif
 #include "esp_log.h"
 
@@ -19,123 +20,237 @@ static const char* TAG = "HAL";
 
 using namespace HAL;
 
+#if HAL_USE_I2C
+void HalCardputer::_init_i2c()
+{
+    ESP_LOGI(TAG, "init i2c");
+    _i2c = new I2CMaster();
+}
+#endif
+
+#if HAL_USE_DISPLAY
+static constexpr size_t EMOJI_CACHE_CAP = 10;
+static struct EmojiCacheEntry
+{
+    uint32_t code = 0;
+    uint8_t* data = nullptr;
+    uint32_t len = 0;
+    int16_t png_w = 0;
+    int16_t png_h = 0;
+} s_emoji_cache[EMOJI_CACHE_CAP];
+static uint8_t s_emoji_cache_n = 0;
+
+static const EmojiCacheEntry* emoji_cache_lookup(uint32_t code)
+{
+    for (uint8_t i = 0; i < s_emoji_cache_n; i++)
+    {
+        if (s_emoji_cache[i].code == code)
+            return &s_emoji_cache[i];
+    }
+
+    char path[48];
+    snprintf(path, sizeof(path), "/sdcard/emoji/u%lX.png", code);
+
+    EmojiCacheEntry entry;
+    entry.code = code;
+
+    FILE* f = fopen(path, "rb");
+    if (f)
+    {
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        if (sz > 24 && sz < 64 * 1024)
+        {
+            entry.data = (uint8_t*)malloc(sz);
+            if (entry.data)
+            {
+                fseek(f, 0, SEEK_SET);
+                if ((long)fread(entry.data, 1, sz, f) == sz)
+                {
+                    entry.len = (uint32_t)sz;
+                    entry.png_w = (int16_t)((entry.data[18] << 8) | entry.data[19]);
+                    entry.png_h = (int16_t)((entry.data[22] << 8) | entry.data[23]);
+                }
+                else
+                {
+                    free(entry.data);
+                    entry.data = nullptr;
+                }
+            }
+        }
+        fclose(f);
+    }
+
+    if (s_emoji_cache_n < EMOJI_CACHE_CAP)
+    {
+        s_emoji_cache[s_emoji_cache_n++] = entry;
+    }
+    else
+    {
+        free(s_emoji_cache[0].data);
+        memmove(&s_emoji_cache[0], &s_emoji_cache[1], sizeof(s_emoji_cache[0]) * (EMOJI_CACHE_CAP - 1));
+        s_emoji_cache[EMOJI_CACHE_CAP - 1] = entry;
+    }
+    return &s_emoji_cache[s_emoji_cache_n - 1];
+}
+
+static int32_t emoji_draw_callback(lgfx::LGFXBase* gfx, int32_t x, int32_t y, uint32_t code, int32_t font_height)
+{
+    auto* e = emoji_cache_lookup(code);
+    if (!e->data || e->png_h <= 0)
+        return 0;
+
+    float scale = (float)font_height / (float)e->png_h;
+    if (!gfx->drawPng(e->data, e->len, x, y - (int32_t)((font_height * 90.0f) / 100.0f), 0, 0, 0, 0, scale, 0))
+        return 0;
+
+    return (int32_t)(e->png_w * scale);
+}
+
 void HalCardputer::_init_display()
 {
     ESP_LOGI(TAG, "init display");
 
-    // Display
-    _display = new M5GFX;
-    _display->init();
-    // Canvas
+    _display = new LGFX;
     _canvas = new LGFX_Sprite(_display);
     _canvas->createSprite(_display->width(), _display->height());
-    //_canvas->setFont(&fonts::efontEN_10);
-}
 
-void HalCardputer::_init_keyboard()
-{
-    _keyboard = new KEYBOARD::Keyboard;
-    _keyboard->init();
-}
-#ifdef HAVE_MIC
-void HalCardputer::_init_mic()
-{
-    ESP_LOGI(TAG, "init mic");
-
-    _mic = new m5::Mic_Class;
-
-    // Configs
-    auto cfg = _mic->config();
-    cfg.pin_data_in = 46;
-    cfg.pin_ws = 43;
-    cfg.magnification = 4;
-
-    cfg.task_priority = 15;
-
-    cfg.dma_buf_count = 4;
-    cfg.dma_buf_len = 256;
-    cfg.stereo = false;
-    cfg.sample_rate = 8000;
-    cfg.over_sampling = 2;
-
-    cfg.i2s_port = i2s_port_t::I2S_NUM_0;
-    _mic->config(cfg);
+    _display->setEmojiCallback(emoji_draw_callback);
+    _canvas->setEmojiCallback(emoji_draw_callback);
 }
 #endif
-#ifdef HAVE_SPEAKER
+
+#if HAL_USE_KEYBOARD
+void HalCardputer::_init_keyboard()
+{
+    ESP_LOGI(TAG, "init keyboard");
+    _keyboard = new KEYBOARD::Keyboard(this);
+    _board_type = _keyboard->boardType();
+}
+#endif
+
+#if HAL_USE_SPEAKER
 void HalCardputer::_init_speaker()
 {
     ESP_LOGI(TAG, "init speaker");
-
-    _speaker = new m5::Speaker_Class;
-
-    auto cfg = _speaker->config();
-    cfg.pin_data_out = 42;
-    cfg.pin_bck = 41;
-    cfg.pin_ws = 43;
-    cfg.i2s_port = i2s_port_t::I2S_NUM_1;
-    cfg.task_priority = 15;
-    _speaker->config(cfg);
+    _speaker = new Speaker(this);
 }
 #endif
-void HalCardputer::_init_button() { _homeButton = new Button(0); }
-#ifdef HAVE_BATTERY
-void HalCardputer::_init_bat() { adc_read_init(); }
+
+#if HAL_USE_MIC
+void HalCardputer::_init_mic()
+{
+    ESP_LOGI(TAG, "init mic");
+    _mic = new Mic();
+}
 #endif
-#ifdef HAVE_SDCARD
-void HalCardputer::_init_sdcard() { _sdcard = new SDCard; }
+
+#if HAL_USE_BUTTON
+void HalCardputer::_init_button()
+{
+    ESP_LOGI(TAG, "init button");
+    _homeButton = new Button(0);
+}
 #endif
-#ifdef HAVE_USB
-void HalCardputer::_init_usb() { _usb = new USB(this); }
+
+#if HAL_USE_BAT
+void HalCardputer::_init_bat()
+{
+    ESP_LOGI(TAG, "init battery");
+    _battery = new Battery();
+}
 #endif
-#ifdef HAVE_WIFI
-void HalCardputer::_init_wifi() { _wifi = new WiFi(_settings); }
+
+#if HAL_USE_SDCARD
+void HalCardputer::_init_sdcard()
+{
+    ESP_LOGI(TAG, "init sdcard");
+    _sdcard = new SDCard;
+}
 #endif
+
+#if HAL_USE_LED
+void HalCardputer::_init_led()
+{
+    ESP_LOGI(TAG, "init led");
+    _led = new LED(RGB_LED_GPIO);
+    _led->off();
+}
+#endif
+
+#if HAL_USE_WIFI
+void HalCardputer::_init_wifi()
+{
+    ESP_LOGI(TAG, "init wifi");
+    _wifi = new WiFi(_settings);
+}
+#endif
+
 void HalCardputer::init()
 {
     ESP_LOGI(TAG, "HAL init");
 
+#if HAL_USE_I2C
+    _init_i2c();
+#endif
+#if HAL_USE_DISPLAY
     _init_display();
+#endif
+#if HAL_USE_KEYBOARD
     _init_keyboard();
-#ifdef HAVE_SPEAKER
+#endif
+#if HAL_USE_SPEAKER
     _init_speaker();
 #endif
-#ifdef HAVE_MIC
+#if HAL_USE_MIC
     _init_mic();
 #endif
+#if HAL_USE_BUTTON
     _init_button();
-#ifdef HAVE_BATTERY
+#endif
+#if HAL_USE_BAT
     _init_bat();
 #endif
-#ifdef HAVE_SDCARD
+#if HAL_USE_SDCARD
     _init_sdcard();
 #endif
-#ifdef HAVE_USB
-    _init_usb();
+#if HAL_USE_LED
+    _init_led();
 #endif
-#ifdef HAVE_WIFI
+#if HAL_USE_WIFI
     _init_wifi();
 #endif
 }
 
-#ifdef HAVE_BATTERY
-uint8_t HalCardputer::getBatLevel()
+#if HAL_USE_BAT
+uint8_t HalCardputer::getBatLevel(float voltage)
 {
-    // https://docs.m5stack.com/zh_CN/core/basic_v2.7
-    double bat_v = static_cast<double>(adc_read_get_value()) * 2 / 1000;
     uint8_t result = 0;
-    if (bat_v >= 4.12)
+    if (voltage >= 4.12)
         result = 100;
-    else if (bat_v >= 3.88)
+    else if (voltage >= 3.88)
         result = 75;
-    else if (bat_v >= 3.61)
+    else if (voltage >= 3.61)
         result = 50;
-    else if (bat_v >= 3.40)
+    else if (voltage >= 3.40)
         result = 25;
     else
         result = 0;
     return result;
 }
 
-double HalCardputer::getBatVoltage() { return static_cast<double>(adc_read_get_value()) * 2 / 1000; }
+float HalCardputer::getBatVoltage() { return static_cast<float>(_battery->get_voltage()); }
 #endif
+
+void HalCardputer::reboot()
+{
+    ESP_LOGW(TAG, "Rebooting...");
+#if HAL_USE_WIFI
+    wifi()->set_status_callback(nullptr);
+#endif
+    delay(100);
+#if HAL_USE_LED
+    led()->off();
+#endif
+    esp_restart();
+}

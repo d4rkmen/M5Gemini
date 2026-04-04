@@ -8,7 +8,6 @@
  * @copyright Copyright (c) 2024
  *
  */
-#ifdef HAVE_SDCARD
 #include <string.h>
 #include <format>
 #include <sys/unistd.h>
@@ -19,6 +18,7 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "sdcard.h"
+#include "common_define.h"
 
 #define PIN_NUM_MISO 39
 #define PIN_NUM_MOSI 14
@@ -49,14 +49,19 @@ bool SDCard::mount(bool format_if_mount_failed)
     bus_cfg.isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO;
     bus_cfg.intr_flags = 0;
     esp_err_t ret = spi_bus_initialize((spi_host_device_t)host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
-    if (ret != ESP_OK)
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
     {
-        ESP_LOGE(TAG, "Failed to initialize SPI bus");
+        ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
         return false;
+    }
+    _bus_shared = (ret == ESP_ERR_INVALID_STATE);
+    if (_bus_shared)
+    {
+        ESP_LOGD(TAG, "SPI bus already initialized (shared with radio), slot=%d", host.slot);
     }
     else
     {
-        ESP_LOGD(TAG, "SPI bus initialized, slot=%d", host.slot);
+        ESP_LOGD(TAG, "SPI bus initialized for SD card, slot=%d", host.slot);
     }
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -69,19 +74,35 @@ bool SDCard::mount(bool format_if_mount_failed)
                                                      .disk_status_check_enable = false,
                                                      .use_one_fat = false};
 
-    ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
-    if (ret != ESP_OK)
+    static constexpr int MAX_MOUNT_RETRIES = 3;
+    static constexpr int RETRY_DELAY_MS = 200;
+
+    for (int attempt = 0; attempt < MAX_MOUNT_RETRIES; attempt++)
     {
+        if (attempt > 0)
+        {
+            ESP_LOGW(TAG, "Retrying SD card mount (attempt %d/%d)...", attempt + 1, MAX_MOUNT_RETRIES);
+            delay(RETRY_DELAY_MS);
+        }
+
+        ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+        if (ret == ESP_OK)
+        {
+            sdmmc_card_print_info(stdout, card);
+            _is_mounted = true;
+            return true;
+        }
+
         card = nullptr;
+        ESP_LOGE(TAG, "Mount attempt %d failed: %s (0x%x)", attempt + 1, esp_err_to_name(ret), ret);
+    }
+
+    if (!_bus_shared)
+    {
         spi_bus_free((spi_host_device_t)host.slot);
-        ESP_LOGE(TAG, "Failed to mount filesystem");
-        return false;
-    };
-
-    sdmmc_card_print_info(stdout, card);
-    _is_mounted = true;
-
-    return true;
+    }
+    ESP_LOGE(TAG, "Failed to mount filesystem after %d attempts", MAX_MOUNT_RETRIES);
+    return false;
 }
 
 bool SDCard::eject()
@@ -98,7 +119,10 @@ bool SDCard::eject()
         return false;
     }
     card = nullptr;
-    spi_bus_free((spi_host_device_t)host.slot);
+    if (!_bus_shared)
+    {
+        spi_bus_free((spi_host_device_t)host.slot);
+    }
     _is_mounted = false;
 
     return true;
@@ -134,4 +158,3 @@ uint64_t SDCard::get_capacity()
     }
     return ((uint64_t)card->csd.capacity) * card->csd.sector_size;
 }
-#endif

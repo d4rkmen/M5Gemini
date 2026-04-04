@@ -8,9 +8,8 @@
  * @copyright Copyright (c) 2024
  *
  */
-#pragma once
-
-#ifdef HAVE_SDCARD
+#ifndef SD_CARD_MANAGER_H
+#define SD_CARD_MANAGER_H
 
 #include "driver/sdspi_host.h"
 #include <string>
@@ -33,6 +32,7 @@ private:
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     sdmmc_card_t* card = nullptr;
     bool _is_mounted = false;
+    bool _bus_shared = false;
 };
 
-#endif
+#endif // SD_CARD_MANAGER_H

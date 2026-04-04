@@ -1,6 +1,6 @@
 #pragma once
 
-#include "M5GFX.h"
+#include "LovyanGFX.h"
 #include "Inter14.h"
 #include "Geist14.h"
 

@@ -12,10 +12,10 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.4.0
+    version: 5.5.3
 direct_dependencies:
 - espressif/esp_websocket_client
 - idf
-manifest_hash: 050e6bdcf8a1d5d4d3677cc52e01bf93a7b5559f64d77bafdafc2e23318c56e6
+manifest_hash: 83b3bf4f3b4b08f67a29de7df25d99a08dd8b1b637bad1d3fbf2bd77eac843ea
 target: esp32s3
 version: 2.0.0

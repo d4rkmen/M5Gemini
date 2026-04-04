@@ -2,123 +2,62 @@
  * @file keyboard.cpp
  * @author Forairaaaaa
  * @brief
- * @version 0.1
+ * @version 0.2
  * @date 2023-09-22
  *
  * @copyright Copyright (c) 2023
  *
  */
-#include <cstring>
 #include "keyboard.h"
+#include "keyboard_reader_iomatrix.h"
+#include "keyboard_reader_tca8418.h"
 #include <driver/gpio.h>
-#include "app/utils/common_define.h"
+#include "common_define.h"
+#include "esp_log.h"
 
-#define digitalWrite(pin, level) gpio_set_level((gpio_num_t)pin, level)
-#define digitalRead(pin) gpio_get_level((gpio_num_t)pin)
+#define TAG "KEYBOARD"
 
 using namespace KEYBOARD;
 
-void Keyboard::_set_output(const std::vector<int>& pinList, uint8_t output)
-{
-    output = output & 0B00000111;
-
-    digitalWrite(pinList[0], (output & 0B00000001));
-    digitalWrite(pinList[1], (output & 0B00000010));
-    digitalWrite(pinList[2], (output & 0B00000100));
-}
-
-uint8_t Keyboard::_get_input(const std::vector<int>& pinList)
-{
-    uint8_t buffer = 0x00;
-    uint8_t pin_value = 0x00;
-
-    for (int i = 0; i < 7; i++)
-    {
-        pin_value = (digitalRead(pinList[i]) == 1) ? 0x00 : 0x01;
-        pin_value = pin_value << i;
-        buffer = buffer | pin_value;
-    }
-
-    return buffer;
-}
-
 void Keyboard::init()
 {
-    // for (auto i : output_list) {
-    //     gpio_reset_pin((gpio_num_t)i);
-    //     pinMode(i, OUTPUT);
-    //     digitalWrite(i, 0);
-    // }
-
-    // for (auto i : input_list) {
-    //     gpio_reset_pin((gpio_num_t)i);
-    //     pinMode(i, INPUT_PULLUP);
-    // }
-
-    // _set_output(output_list, 0);
-
-    for (auto i : output_list)
+    // Detect board type if set to AUTO_DETECT
+    if (_board_type == HAL::BoardType::AUTO_DETECT)
     {
-        gpio_reset_pin((gpio_num_t)i);
-        gpio_set_direction((gpio_num_t)i, GPIO_MODE_OUTPUT);
-        gpio_set_pull_mode((gpio_num_t)i, GPIO_PULLUP_PULLDOWN);
-        digitalWrite(i, 0);
-    }
+        ESP_LOGI(TAG, "Auto-detecting board type...");
 
-    for (auto i : input_list)
-    {
-        gpio_reset_pin((gpio_num_t)i);
-        gpio_set_direction((gpio_num_t)i, GPIO_MODE_INPUT);
-        gpio_set_pull_mode((gpio_num_t)i, GPIO_PULLUP_ONLY);
-    }
+        // Try to initialize TCA8418 keyboard reader
+        auto tca8418_reader = std::make_unique<TCA8418KeyboardReader>(_hal);
+        tca8418_reader->init();
 
-    _set_output(output_list, 0);
-
-    _last_pressed_time = millis();
-}
-
-Point2D_t Keyboard::getKey()
-{
-    Point2D_t coor;
-    coor.x = -1;
-    coor.y = -1;
-
-    uint8_t input_value = 0;
-
-    for (int i = 0; i < 8; i++)
-    {
-        _set_output(output_list, i);
-        // printf("% 3d,\t", get_input(inputList));
-
-        input_value = _get_input(input_list);
-
-        /* If key pressed */
-        if (input_value)
+        if (tca8418_reader->isInitialized())
         {
-
-            /* Get X */
-            for (int j = 0; j < 7; j++)
-            {
-                if (input_value == X_map_chart[j].value)
-                {
-                    coor.x = (i > 3) ? X_map_chart[j].x_1 : X_map_chart[j].x_2;
-                    break;
-                }
-            }
-
-            /* Get Y */
-            coor.y = (i > 3) ? (i - 4) : i;
-
-            /* Keep the same as picture */
-            coor.y = -coor.y;
-            coor.y = coor.y + 3;
-
-            break;
+            ESP_LOGI(TAG, "TCA8418 initialized successfully - using CARDPUTER_ADV mode");
+            _board_type = HAL::BoardType::CARDPUTER_ADV;
+            _keyboard_reader = std::move(tca8418_reader);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "TCA8418 initialization failed - using CARDPUTER mode");
+            _board_type = HAL::BoardType::CARDPUTER;
+            _keyboard_reader = std::make_unique<IOMatrixKeyboardReader>();
+            _keyboard_reader->init();
         }
     }
+    else if (_board_type == HAL::BoardType::CARDPUTER_ADV)
+    {
+        ESP_LOGI(TAG, "Board type forced to CARDPUTER_ADV");
+        _keyboard_reader = std::make_unique<TCA8418KeyboardReader>(_hal, KEYBOARD_TCA8418_INT_PIN);
+        _keyboard_reader->init();
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Board type forced to CARDPUTER");
+        _keyboard_reader = std::make_unique<IOMatrixKeyboardReader>();
+        _keyboard_reader->init();
+    }
 
-    // printf("%d,%d\n", x, y);
-    return coor;
+    _last_pressed_time = millis();
 }
 
 uint8_t Keyboard::getKeyNum(Point2D_t keyCoor)
@@ -137,39 +76,44 @@ uint8_t Keyboard::getKeyNum(Point2D_t keyCoor)
 
 void Keyboard::updateKeyList()
 {
-    _key_list_buffer.clear();
-
-    Point2D_t coor;
-
-    uint8_t input_value = 0;
-
-    for (int i = 0; i < 8; i++)
+    if (_keyboard_reader)
     {
-        _set_output(output_list, i);
+        _keyboard_reader->update();
 
-        input_value = _get_input(input_list);
+        const auto& raw_keys = _keyboard_reader->keyList();
 
-        /* If key pressed */
-        if (input_value)
+        // Clear suppress flag when wake key is released
+        if (_suppress_key_until_release && raw_keys.empty())
         {
-            /* Get X */
-            for (int j = 0; j < 7; j++)
+            _suppress_key_until_release = false;
+        }
+
+        // When dimmed, key press wakes screen but key is not processed
+        if (_is_dimmed && !raw_keys.empty())
+        {
+            setDimmed(false);
+            _suppress_key_until_release = true;
+        }
+
+        // Update last pressed time if keys are pressed (reset dim idle timer)
+        if (!raw_keys.empty())
+        {
+            _last_pressed_time = millis();
+        }
+
+        // Dim timeout logic: dim when idle, undim when recent activity
+        uint32_t now = millis();
+        if (_dim_time_ms > 0)
+        {
+            if ((now - _last_pressed_time) > _dim_time_ms)
             {
-
-                if (input_value & (0x01 << j))
-                {
-                    coor.x = (i > 3) ? X_map_chart[j].x_1 : X_map_chart[j].x_2;
-
-                    /* Get Y */
-                    coor.y = (i > 3) ? (i - 4) : i;
-
-                    /* Keep the same as picture */
-                    coor.y = -coor.y;
-                    coor.y = coor.y + 3;
-
-                    _key_list_buffer.push_back(coor);
-                    _last_pressed_time = millis();
-                }
+                if (!_is_dimmed)
+                    setDimmed(true);
+            }
+            else
+            {
+                if (_is_dimmed)
+                    setDimmed(false);
             }
         }
     }
@@ -177,25 +121,23 @@ void Keyboard::updateKeyList()
 
 bool Keyboard::isKeyPressing(int keyNum)
 {
-    if (_key_list_buffer.size())
+    const auto& keys = keyList();
+    for (const auto& key : keys)
     {
-        for (const auto& i : _key_list_buffer)
-        {
-            if (getKeyNum(i) == keyNum)
-                return true;
-        }
+        if (getKeyNum(key) == keyNum)
+            return true;
     }
     return false;
 }
 
 bool Keyboard::waitForRelease(int keyNum, int timeout_ms)
 {
-    uint32_t start = millis();
+    const uint32_t start = millis();
     while (isKeyPressing(keyNum))
     {
         delay(10);
         updateKeyList();
-        if (millis() - start > timeout_ms)
+        if (timeout_ms && (millis() - start > static_cast<uint32_t>(timeout_ms)))
         {
             return false;
         }
@@ -208,92 +150,77 @@ void Keyboard::updateKeysState()
     _keys_state_buffer.reset();
     _key_values_without_special_keys.clear();
 
-    // Get special keys
-    for (auto& i : _key_list_buffer)
+    const auto& keys = keyList();
+
+    // Process all keys in one pass
+    for (const auto& key : keys)
     {
-        if (strcmp(getKeyValue(i).value_first, "tab") == 0)
+        const auto& key_value = getKeyValue(key);
+
+        switch (key_value.key_type)
         {
+        case KeyType::TAB:
             _keys_state_buffer.tab = true;
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "fn") == 0)
-        {
+            break;
+        case KeyType::FN:
             _keys_state_buffer.fn = true;
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "shift") == 0)
-        {
+            break;
+        case KeyType::SHIFT:
             _keys_state_buffer.shift = true;
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "ctrl") == 0)
-        {
+            break;
+        case KeyType::CTRL:
             _keys_state_buffer.ctrl = true;
-            continue;
-        }
-        if (strcmp(getKeyValue(i).value_first, "opt") == 0)
-        {
+            break;
+        case KeyType::OPT:
             _keys_state_buffer.opt = true;
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "alt") == 0)
-        {
+            break;
+        case KeyType::ALT:
             _keys_state_buffer.alt = true;
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "del") == 0)
-        {
+            break;
+        case KeyType::DEL:
             _keys_state_buffer.del = true;
-            _keys_state_buffer.hidKey.push_back(KEY_BACKSPACE);
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "enter") == 0)
-        {
+            break;
+        case KeyType::ENTER:
             _keys_state_buffer.enter = true;
-            _keys_state_buffer.hidKey.push_back(KEY_ENTER);
-            continue;
-        }
-
-        if (strcmp(getKeyValue(i).value_first, "space") == 0)
-        {
+            break;
+        case KeyType::SPACE:
             _keys_state_buffer.space = true;
-            _keys_state_buffer.hidKey.push_back(KEY_SPACE);
-            continue;
+            break;
+        case KeyType::REGULAR:
+        default:
+            _key_values_without_special_keys.push_back(key);
+            break;
         }
-
-        _key_values_without_special_keys.push_back(i);
     }
 
-    // Deal what left
-    for (auto& i : _key_values_without_special_keys)
+    // Process regular keys
+    const bool modifier_active = _keys_state_buffer.ctrl || _keys_state_buffer.shift || _is_caps_locked;
+    for (const auto& key : _key_values_without_special_keys)
     {
-        if (_keys_state_buffer.ctrl || _keys_state_buffer.shift || _is_caps_locked)
-        {
-            _keys_state_buffer.values.push_back(*getKeyValue(i).value_second);
-            _keys_state_buffer.hidKey.push_back(getKeyValue(i).value_num_second);
-        }
-        else
-        {
-            _keys_state_buffer.values.push_back(*getKeyValue(i).value_first);
-            _keys_state_buffer.hidKey.push_back(getKeyValue(i).value_num_first);
-        }
+        const auto& key_value = getKeyValue(key);
+        _keys_state_buffer.values.push_back(modifier_active ? *key_value.value_second : *key_value.value_first);
     }
 }
 
 bool Keyboard::isChanged()
 {
-    if (_last_key_size != _key_list_buffer.size())
-    {
-        _last_key_size = _key_list_buffer.size();
-        return true;
-    }
-    return false;
+    const uint8_t current_size = keyList().size();
+    const bool changed = (_last_key_size != current_size);
+    _last_key_size = current_size;
+    return changed;
 }
 
-uint32_t Keyboard::lastPressedTime() { return _last_pressed_time; }
+uint32_t Keyboard::lastPressedTime() const { return _last_pressed_time; }
+void Keyboard::resetLastPressedTime() { _last_pressed_time = millis(); }
+void Keyboard::setDimmed(bool value)
+{
+    if (_is_dimmed != value)
+    {
+        _is_dimmed = value;
+        if (_dimmed_callback)
+            _dimmed_callback(_is_dimmed);
+    }
+}
+bool Keyboard::isDimmed() const { return _is_dimmed; }
+void Keyboard::setDimmedCallback(std::function<void(bool)> cb) { _dimmed_callback = std::move(cb); }
+void Keyboard::set_dim_time(uint32_t ms) { _dim_time_ms = ms; }

@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "unicode_fonts.hpp"
+
 #define THEME_COLOR_BG TFT_BLACK
 #define THEME_COLOR_TITLE (uint32_t)(0x2D97DD)
 #define THEME_COLOR_TITLE_HISTORY (uint32_t)(0x5DA9D8)
@@ -41,6 +43,6 @@
 #define THEME_COLOR_KB_OPT TFT_DARKGREEN
 
 #define THEME_COLOR_REPL_TEXT TFT_WHITE
-#define FONT_10 &fonts::efontEN_10
-#define FONT_12 &fonts::efontEN_12
-#define FONT_16 &fonts::efontEN_16
+#define FONT_10 &efont_unicode_10
+#define FONT_12 &efont_unicode_12
+#define FONT_16 &efont_unicode_16

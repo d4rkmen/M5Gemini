@@ -5,7 +5,8 @@
  * @date 2023-07-01
  */
 
-#ifdef HAVE_WIFI
+#include "hal_config.h"
+#if HAL_USE_WIFI
 #include <algorithm>
 #include "wifi.h"
 #include "lwip/err.h"

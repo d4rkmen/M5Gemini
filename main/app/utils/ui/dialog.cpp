@@ -145,7 +145,7 @@ namespace UTILS
                         dialog_y + 10 + VERTICAL_SPACING);
                     need_update = true;
                 }
-                if (hal->homeButton()->isPressed())
+                if (hal->home_button()->isPressed())
                 {
                     if (!title_fits)
                     {
@@ -529,7 +529,7 @@ namespace UTILS
 
                 hal->canvas_update();
 
-                if (hal->homeButton()->isPressed())
+                if (hal->home_button()->isPressed())
                 {
                     result = false;
                     break;
@@ -791,7 +791,7 @@ namespace UTILS
 
                 hal->canvas_update();
 
-                if (hal->homeButton()->isPressed())
+                if (hal->home_button()->isPressed())
                 {
                     result = false;
                     break;
@@ -1014,7 +1014,7 @@ namespace UTILS
                                THEME_COLOR_BG);
 
                 hal->canvas_update();
-                if (hal->homeButton()->isPressed())
+                if (hal->home_button()->isPressed())
                 {
                     selected_index = -1;
                     selecting = false;

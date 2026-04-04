@@ -1,6 +1,6 @@
 #include "Button.h"
 #include <driver/gpio.h>
-#include "../../app/utils/common_define.h"
+#include "common_define.h"
 
 Button::Button(uint8_t pin, uint16_t debounce_ms)
     : _pin(pin), _delay(debounce_ms), _state(true), _ignore_until(0), _has_changed(false)

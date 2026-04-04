@@ -9,130 +9,193 @@
  *
  */
 #pragma once
-#include "M5GFX.h"
-#include "keyboard/keyboard.h"
-#ifdef HAVE_SDCARD
-#include "sdcard/sdcard.h"
+#include "hal_config.h"
+#include "board.h"
+#if HAL_USE_DISPLAY
+#include "LovyanGFX.h"
 #endif
-#include "button/Button.h"
-#include "M5Unified.h"
-#ifdef HAVE_USB
-#include "usb/usb.h"
-#endif
-#ifdef HAVE_WIFI
-#include "wifi/wifi.h"
-#endif
-#ifdef HAVE_SETTINGS
 #include "settings/settings.h"
-#endif
 #include <iostream>
 #include <string>
+
+#if HAL_USE_I2C
+#include "i2c/i2c_master.h"
+#endif
+#if HAL_USE_KEYBOARD
+#include "keyboard/keyboard.h"
+#endif
+#if HAL_USE_BAT
+#include "bat/battery.h"
+#endif
+#if HAL_USE_SDCARD
+#include "sdcard/sdcard.h"
+#endif
+#if HAL_USE_BUTTON
+#include "button/Button.h"
+#endif
+#if HAL_USE_SPEAKER
+#include "speaker/speaker.h"
+#endif
+#if HAL_USE_MIC
+#include "mic/mic.h"
+#endif
+#if HAL_USE_LED
+#include "led/led.h"
+#endif
+#if HAL_USE_WIFI
+#include "wifi/wifi.h"
+#endif
 
 namespace HAL
 {
     /**
-     * @brief Hal base for DI
+     * @brief Hal base class
      *
      */
     class Hal
     {
     protected:
+        SETTINGS::Settings* _settings;
+        BoardType _board_type;
+
+#if HAL_USE_DISPLAY
         LGFX_Device* _display;
         LGFX_Sprite* _canvas;
-        LGFX_Sprite* _canvas_system_bar;
-
-#ifdef HAVE_SETTINGS
-        SETTINGS::Settings* _settings;
+        bool _display_sleeping = false;
 #endif
+#if HAL_USE_KEYBOARD
         KEYBOARD::Keyboard* _keyboard;
-#ifdef HAVE_MIC
-        m5::Mic_Class* _mic;
 #endif
-#ifdef HAVE_SPEAKER
-        m5::Speaker_Class* _speaker;
+#if HAL_USE_I2C
+        I2CMaster* _i2c;
 #endif
+#if HAL_USE_BAT
+        Battery* _battery;
+#endif
+#if HAL_USE_SPEAKER
+        Speaker* _speaker;
+#endif
+#if HAL_USE_MIC
+        Mic* _mic;
+#endif
+#if HAL_USE_BUTTON
         Button* _homeButton;
-#ifdef HAVE_SDCARD
+#endif
+#if HAL_USE_SDCARD
         SDCard* _sdcard;
 #endif
-#ifdef HAVE_USB
-        USB* _usb;
+#if HAL_USE_LED
+        LED* _led;
 #endif
-#ifdef HAVE_WIFI
+#if HAL_USE_WIFI
         WiFi* _wifi;
 #endif
+
     public:
-        Hal(
-#ifdef HAVE_SETTINGS
-            SETTINGS::Settings* settings
-#endif
-            )
-            : _display(nullptr), _canvas(nullptr), _canvas_system_bar(nullptr)
-#ifdef HAVE_SETTINGS
-              ,
-              _settings(settings)
-#endif
+        Hal(SETTINGS::Settings* settings)
+            : _settings(settings), _board_type(BoardType::AUTO_DETECT)
+#if HAL_USE_KEYBOARD
               ,
               _keyboard(nullptr)
-#ifdef HAVE_MIC
-              ,
-              _mic(nullptr)
 #endif
-#ifdef HAVE_SPEAKER
+#if HAL_USE_I2C
+              ,
+              _i2c(nullptr)
+#endif
+#if HAL_USE_BAT
+              ,
+              _battery(nullptr)
+#endif
+#if HAL_USE_SPEAKER
               ,
               _speaker(nullptr)
 #endif
+#if HAL_USE_MIC
+              ,
+              _mic(nullptr)
+#endif
+#if HAL_USE_BUTTON
               ,
               _homeButton(nullptr)
-#ifdef HAVE_SDCARD
+#endif
+#if HAL_USE_SDCARD
               ,
               _sdcard(nullptr)
 #endif
-#ifdef HAVE_USB
+#if HAL_USE_LED
               ,
-              _usb(nullptr)
+              _led(nullptr)
 #endif
-#ifdef HAVE_WIFI
+#if HAL_USE_WIFI
               ,
               _wifi(nullptr)
 #endif
         {
-            // constructor
         }
 
-        // Getter
+        // Getters
+        inline SETTINGS::Settings* settings() { return _settings; }
+        inline BoardType board_type() const { return _board_type; }
+
+#if HAL_USE_DISPLAY
         inline LGFX_Device* display() { return _display; }
         inline LGFX_Sprite* canvas() { return _canvas; }
-        inline LGFX_Sprite* canvas_system_bar() { return _canvas_system_bar; }
-#ifdef HAVE_SETTINGS
-        inline SETTINGS::Settings* settings() { return _settings; }
+        inline void canvas_update()
+        {
+            if (!_display_sleeping)
+                _canvas->pushSprite(0, 0);
+        }
+        inline bool isDisplaySleeping() const { return _display_sleeping; }
+        inline void displaySleep()
+        {
+            if (!_display_sleeping)
+            {
+                _display_sleeping = true;
+                _display->sleep();
+            }
+        }
+        inline void displayWakeup()
+        {
+            if (_display_sleeping)
+            {
+                _display_sleeping = false;
+                _display->wakeup();
+            }
+        }
 #endif
+#if HAL_USE_KEYBOARD
         inline KEYBOARD::Keyboard* keyboard() { return _keyboard; }
-#ifdef HAVE_SDCARD
+#endif
+#if HAL_USE_I2C
+        inline I2CMaster* i2c() { return _i2c; }
+#endif
+#if HAL_USE_BAT
+        inline Battery* bat() { return _battery; }
+#endif
+#if HAL_USE_SPEAKER
+        inline Speaker* speaker() { return _speaker; }
+#endif
+#if HAL_USE_MIC
+        inline Mic* mic() { return _mic; }
+#endif
+#if HAL_USE_BUTTON
+        inline Button* home_button() { return _homeButton; }
+#endif
+#if HAL_USE_SDCARD
         inline SDCard* sdcard() { return _sdcard; }
 #endif
-#ifdef HAVE_USB
-        inline USB* usb() { return _usb; }
+#if HAL_USE_LED
+        inline LED* led() { return _led; }
 #endif
-        inline Button* homeButton() { return _homeButton; }
-#ifdef HAVE_MIC
-        inline m5::Mic_Class* mic() { return _mic; }
-#endif
-#ifdef HAVE_SPEAKER
-        inline m5::Speaker_Class* speaker() { return _speaker; }
-#endif
-#ifdef HAVE_WIFI
+#if HAL_USE_WIFI
         inline WiFi* wifi() { return _wifi; }
 #endif
-        // Canvas
-        inline void canvas_system_bar_update() { _canvas_system_bar->pushSprite(0, 0); }
-        inline void canvas_update() { _canvas->pushSprite(0, 0); }
 
         // Override
         virtual std::string type() { return "null"; }
         virtual void init() {}
 
-#ifdef HAVE_SPEAKER
+#if HAL_USE_SPEAKER
         virtual void playLastSound() {}
         virtual void playNextSound() {}
         virtual void playKeyboardSound() {}
@@ -140,9 +203,11 @@ namespace HAL
         virtual void playDeviceConnectedSound() {}
         virtual void playDeviceDisconnectedSound() {}
 #endif
-#ifdef HAVE_BATTERY
-        virtual uint8_t getBatLevel() { return 100; }
-        virtual double getBatVoltage() { return 4.15; }
+
+#if HAL_USE_BAT
+        virtual uint8_t getBatLevel(float voltage) { return 100; }
+        virtual float getBatVoltage() { return 4.15; }
 #endif
+        virtual void reboot() {}
     };
 } // namespace HAL

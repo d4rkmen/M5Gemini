@@ -15,8 +15,7 @@ file(GLOB_RECURSE SETTINGS_SRCS
 
 idf_component_register(SRCS "main.cpp" ${APP_SRCS} ${HAL_SRCS} ${SETTINGS_SRCS}
                     INCLUDE_DIRS "." "./hal"
-                    REQUIRES M5Unified M5GFX nvs_flash esp_wifi driver fatfs esp_http_client json
-#                    EMBED_TXTFILES google_root_cert.pem elevenlabs_root_cert.pem
+                    REQUIRES LovyanGFX nvs_flash esp_wifi esp_adc driver fatfs esp_http_client json
                     EMBED_FILES sound/error.wav sound/snap.wav
                     WHOLE_ARCHIVE)
                     

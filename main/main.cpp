@@ -9,13 +9,9 @@
 static const char* TAG = "M5Gemini";
 
 using namespace HAL;
-#ifdef HAVE_SETTINGS
 using namespace SETTINGS;
-#endif
 
-#ifdef HAVE_SETTINGS
 Settings settings;
-#endif
 HalCardputer hal(&settings);
 
 extern "C" void app_main(void)

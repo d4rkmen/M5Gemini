@@ -1,4 +1,4 @@
-#include "M5GFX.h"
+#include "LovyanGFX.h"
 #include "g_fonts.hpp"
 
 const lgfx::U8g2font font_inter14 = {font_inter_14};

@@ -1,5 +1,6 @@
 #pragma once
-#ifdef HAVE_WIFI
+#include "hal_config.h"
+#if HAL_USE_WIFI
 #include <string>
 #include <functional>
 #include "esp_wifi.h"

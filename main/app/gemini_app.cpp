@@ -1,4 +1,5 @@
 #include "gemini_app.h"
+#include "audio_buffer.h"
 #include "esp_log.h"
 #include "app/utils/ui/dialog.h"
 #include "app/utils/ui/settings_screen.h"
@@ -75,7 +76,7 @@ void logFreeHeapCallback(TimerHandle_t xTimer)
 GeminiApp::GeminiApp(HAL::Hal* hal) : _hal(hal), _currentScreen(SCREEN_START), _scrollPosition(0)
 {
     //
-    _hal->canvas()->setFont(&fonts::efontEN_16);
+    _hal->canvas()->setFont(FONT_16);
     _hintTextContext = new UTILS::HL_TEXT::HLTextContext_t();
     UTILS::HL_TEXT::hl_text_init(_hintTextContext, _hal->canvas(), 20, 1500);
 

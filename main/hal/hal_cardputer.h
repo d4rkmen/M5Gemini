@@ -9,105 +9,90 @@
  *
  */
 #include "hal.h"
-#ifdef HAVE_SETTINGS
-#include "settings/settings.h"
-#endif
+#include "common_define.h"
 
+#define RGB_LED_GPIO 21
+
+#if HAL_USE_SPEAKER
 extern const uint8_t error_wav_start[] asm("_binary_error_wav_start");
 extern const uint8_t error_wav_end[] asm("_binary_error_wav_end");
+#endif
 
 namespace HAL
 {
     class HalCardputer : public Hal
     {
     private:
-        void _init_display();
-        void _init_keyboard();
-#ifdef HAVE_MIC
-        void _init_mic();
+#if HAL_USE_I2C
+        void _init_i2c();
 #endif
-#ifdef HAVE_SPEAKER
-#define SYSTEM_CHANNEL 0
-#define AUDIO_CHANNEL 1
+#if HAL_USE_DISPLAY
+        void _init_display();
+#endif
+#if HAL_USE_KEYBOARD
+        void _init_keyboard();
+#endif
+#if HAL_USE_SPEAKER
         void _init_speaker();
 #endif
+#if HAL_USE_MIC
+        void _init_mic();
+#endif
+#if HAL_USE_BUTTON
         void _init_button();
-#ifdef HAVE_BATTERY
+#endif
+#if HAL_USE_BAT
         void _init_bat();
 #endif
-#ifdef HAVE_SDCARD
+#if HAL_USE_SDCARD
         void _init_sdcard();
 #endif
-#ifdef HAVE_USB
-        void _init_usb();
+#if HAL_USE_LED
+        void _init_led();
 #endif
-#ifdef HAVE_WIFI
+#if HAL_USE_WIFI
         void _init_wifi();
 #endif
 
     public:
-        HalCardputer(
-#ifdef HAVE_SETTINGS
-            SETTINGS::Settings* settings
-#endif
-            )
-            : Hal(
-#ifdef HAVE_SETTINGS
-                  settings
-#endif
-              )
+        HalCardputer(SETTINGS::Settings* settings) : Hal(settings) {}
+
+        std::string type() override
         {
+            switch (_board_type)
+            {
+            case HAL::BoardType::CARDPUTER:
+                return "v1.x";
+            case HAL::BoardType::CARDPUTER_ADV:
+                return "ADV";
+            default:
+                return "unknown";
+            }
         }
-        std::string type() override { return "cardputer"; }
         void init() override;
-#ifdef HAVE_SPEAKER
-        void setSystemtVolume()
+
+#if HAL_USE_SPEAKER
+        void playErrorSound() override { _speaker->playWav(error_wav_start, error_wav_end - error_wav_start); }
+        void playKeyboardSound() override { _speaker->tone(5000, 20); }
+        void playLastSound() override { _speaker->tone(6000, 20); }
+        void playNextSound() override { _speaker->tone(7000, 20); }
+        void playDeviceConnectedSound() override
         {
-            _speaker->setVolume(255);
-            _speaker->setChannelVolume(SYSTEM_CHANNEL, _settings->getNumber("system", "volume"));
+            _speaker->tone(1000, 100);
+            delay(50);
+            _speaker->tone(1500, 200);
         }
-        void playErrorSound() override
+        void playDeviceDisconnectedSound() override
         {
-            setSystemtVolume();
-            _speaker->playWav(error_wav_start, error_wav_end - error_wav_start, 1, SYSTEM_CHANNEL);
-        }
-        void playKeyboardSound() override
-        {
-            setSystemtVolume();
-            _speaker->tone(5000, 20, SYSTEM_CHANNEL);
-        }
-        void playLastSound() override
-        {
-            setSystemtVolume();
-            _speaker->tone(6000, 20, SYSTEM_CHANNEL);
-        }
-        void playNextSound() override
-        {
-            setSystemtVolume();
-            _speaker->tone(7000, 20, SYSTEM_CHANNEL);
-        }
-        void playDeviceConnectedSound()
-        {
-            setSystemtVolume();
-            _speaker->tone(1000, 100, SYSTEM_CHANNEL);
-            vTaskDelay(50);
-            _speaker->tone(1500, 200, SYSTEM_CHANNEL);
-        }
-        void playDeviceDisconnectedSound()
-        {
-            setSystemtVolume();
-            _speaker->tone(1500, 100, SYSTEM_CHANNEL);
-            vTaskDelay(50);
-            _speaker->tone(1000, 200, SYSTEM_CHANNEL);
+            _speaker->tone(1500, 100);
+            delay(50);
+            _speaker->tone(1000, 200);
         }
 #endif
-#ifdef HAVE_BATTERY
-        uint8_t getBatLevel() override;
-        double getBatVoltage() override;
+#if HAL_USE_BAT
+        uint8_t getBatLevel(float voltage) override;
+        float getBatVoltage() override;
 #endif
-#ifdef HAVE_USB
-        void _init_usb();
-#endif
-    public:
+        void reboot() override;
     };
 } // namespace HAL
