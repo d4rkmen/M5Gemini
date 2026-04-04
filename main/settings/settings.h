@@ -7,9 +7,15 @@
 
 #include <string>
 #include <vector>
+#include <functional>
 #include <unordered_map>
 #include "nvs_flash.h"
 #include "esp_log.h"
+
+namespace HAL
+{
+    class Hal;
+}
 
 namespace SETTINGS
 {
@@ -19,7 +25,8 @@ namespace SETTINGS
         TYPE_NONE,
         TYPE_BOOL,
         TYPE_NUMBER,
-        TYPE_STRING
+        TYPE_STRING,
+        TYPE_CALLBACK
     };
 
     struct SettingItem_t
@@ -32,6 +39,7 @@ namespace SETTINGS
         std::string min_val; // For TYPE_NUMBER
         std::string max_val; // For TYPE_NUMBER
         std::string hint;
+        std::function<void(SettingItem_t& item)> callback;
     };
 
     struct SettingGroup_t
@@ -39,6 +47,7 @@ namespace SETTINGS
         std::string name;
         std::string nvs_namespace;
         std::vector<SettingItem_t> items;
+        std::function<void(SettingGroup_t& group)> callback;
     };
 
     class Settings
@@ -46,6 +55,12 @@ namespace SETTINGS
     public:
         Settings();
         ~Settings();
+
+        /**
+         * @brief Set HAL pointer and initialize callbacks that require HAL access
+         * @param hal Pointer to HAL instance
+         */
+        void setHal(HAL::Hal* hal);
 
         /**
          * @brief Initialize settings system and load values from NVS
@@ -131,7 +146,8 @@ namespace SETTINGS
         bool importFromFile(const std::string& filename);
 
     private:
-        static const char* NVS_PARTITION;
+        static const char* const NVS_PARTITIONS[];
+        const char* _active_partition = nullptr;
 
         // Cache storage
         struct CachedValue
@@ -145,6 +161,7 @@ namespace SETTINGS
             std::string str_val;
         };
 
+        HAL::Hal* _hal = nullptr;
         std::unordered_map<std::string, CachedValue> _cache;
         std::vector<SettingGroup_t> _metadata;
         bool _initialized = false;

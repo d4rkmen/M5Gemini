@@ -7,10 +7,10 @@ class Button
 public:
     Button(uint8_t pin, uint16_t debounce_ms = 100);
     bool read();
-    bool isToggled();
-    bool isPressed();
-    bool isReleased();
-    bool hasChanged();
+    bool is_toggled();
+    bool is_pressed();
+    bool is_released();
+    bool has_changed();
 
     const static bool PRESSED = false;
     const static bool RELEASED = true;

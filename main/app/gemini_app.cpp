@@ -36,8 +36,6 @@ static const char* ELEVENLABS_NS = "elevenlabs";
 // STT configuration
 static const char* DEEPGRAM_NS = "deepgram";
 
-std::string settings_file_name = "/sdcard/settings.txt";
-
 static bool is_repeat = false;
 static bool is_start = false;
 #define KEY_HOLD_MS 500
@@ -287,8 +285,35 @@ void GeminiApp::init()
 {
     ESP_LOGI(TAG, "Initializing");
     setState(APP_STATE_DISCONNECTED);
-    // Get settings metadata
+    // Get settings metadata and set up group callbacks
     _groups = _hal->settings()->getMetadata();
+    // group 2 = Gemini: show QR code if API key empty
+    _groups[2].callback = [this](SETTINGS::SettingGroup_t& group)
+    {
+        if (_hal->settings()->getString("gemini", "api_key").empty())
+        {
+            _currentScreen = SCREEN_QR_GEMINI;
+            is_rendered = false;
+        }
+    };
+    // group 3 = ElevenLabs: show QR code if API key empty
+    _groups[3].callback = [this](SETTINGS::SettingGroup_t& group)
+    {
+        if (_hal->settings()->getString("elevenlabs", "api_key").empty())
+        {
+            _currentScreen = SCREEN_QR_ELEVENLABS;
+            is_rendered = false;
+        }
+    };
+    // group 4 = Deepgram: show QR code if API key empty
+    _groups[4].callback = [this](SETTINGS::SettingGroup_t& group)
+    {
+        if (_hal->settings()->getString("deepgram", "api_key").empty())
+        {
+            _currentScreen = SCREEN_QR_DEEPGRAM;
+            is_rendered = false;
+        }
+    };
     // Initialize WiFi module
     if (_hal->wifi()->init())
     {
@@ -679,80 +704,10 @@ void GeminiApp::handleSettingsMenu()
         _groups,
         _hintTextContext,
         _descScrollContext,
-        [this](int group_index)
+        [this]()
         {
-            ESP_LOGD(TAG, "handleSettingsMenu on_enter() group_index=%d", group_index);
-            switch (group_index)
-            {
-            case -1:
-                _currentScreen = SCREEN_START;
-                is_rendered = false;
-                break;
-            case 2:
-                if (_hal->settings()->getString(GEMINI_NS, "api_key").empty())
-                {
-                    _currentScreen = SCREEN_QR_GEMINI;
-                    is_rendered = false;
-                }
-                break;
-            case 3:
-                if (_hal->settings()->getString(ELEVENLABS_NS, "api_key").empty())
-                {
-                    _currentScreen = SCREEN_QR_ELEVENLABS;
-                    is_rendered = false;
-                }
-                break;
-            case 4:
-                if (_hal->settings()->getString(DEEPGRAM_NS, "api_key").empty())
-                {
-                    _currentScreen = SCREEN_QR_DEEPGRAM;
-                    is_rendered = false;
-                }
-                break;
-            case 5:
-                // export settings
-                _hal->sdcard()->mount(false);
-                if (_hal->sdcard()->is_mounted())
-                {
-                    _hal->settings()->exportToFile(settings_file_name);
-                    _hal->sdcard()->eject();
-                    UTILS::UI::show_message_dialog(_hal, "Success", "Settings exported to: " + settings_file_name, 5000);
-                }
-                else
-                {
-                    UTILS::UI::show_message_dialog(_hal, "Error", "Failed to mount SD card", 5000);
-                }
-                break;
-            case 6:
-                // import settings
-                _hal->sdcard()->mount(false);
-                if (_hal->sdcard()->is_mounted())
-                {
-                    _hal->settings()->importFromFile(settings_file_name);
-                    _hal->sdcard()->eject();
-                    // set brightness
-                    _hal->display()->setBrightness(_hal->settings()->getNumber("system", "brightness"));
-                    // set volume
-                    // _hal->speaker()->setChannelVolume(SYSTEM_CHANNEL, _hal->settings()->getNumber("system", "volume"));
-                    // _hal->speaker()->setChannelVolume(SYSTEM_CHANNEL, _hal->settings()->getNumber("system", "volume"));
-                    // restart wifi
-                    UTILS::UI::show_progress(_hal, "WiFi", -1, "Stopping...");
-                    _hal->wifi()->init();
-                    // Connect to WiFi if enabled
-                    if (_hal->settings()->getBool("wifi", "enabled"))
-                    {
-                        UTILS::UI::show_progress(_hal, "WiFi", -1, "Starting...");
-                        _hal->wifi()->connect();
-                    }
-
-                    UTILS::UI::show_message_dialog(_hal, "Success", "Settings imported from: " + settings_file_name, 5000);
-                }
-                else
-                {
-                    UTILS::UI::show_error_dialog(_hal, "Error", "Failed to mount SD card", "OK");
-                }
-                break;
-            }
+            _currentScreen = SCREEN_START;
+            is_rendered = false;
         });
 
     // Update the display if needed

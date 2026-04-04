@@ -4,19 +4,21 @@
  */
 
 #include "settings.h"
+#include "hal/hal.h"
+#include "app/utils/ui/dialog.h"
+#include "common_define.h"
 #include <format>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
-#include <stdexcept>
+#include <map>
 
 static const char* TAG = "SETTINGS";
+static const std::string SETTINGS_FILE_NAME = "/sdcard/settings.txt";
 
 namespace SETTINGS
 {
-
-    const char* Settings::NVS_PARTITION = "apps_nvs";
+    const char* const Settings::NVS_PARTITIONS[] = {"nvs", "apps_nvs", nullptr};
 
     Settings::Settings() : _initialized(false)
     {
@@ -50,7 +52,19 @@ namespace SETTINGS
         sys_group.items = {
             back_item,
             {"brightness", "Brightness", TYPE_NUMBER, "100", "100", "10", "255", "Screen brightness level (10-255)"},
-            {"volume", "Volume", TYPE_NUMBER, "64", "64", "0", "255", "System sound volume level (0-255)"},
+            {"volume",
+             "Volume",
+             TYPE_NUMBER,
+             "64",
+             "64",
+             "0",
+             "255",
+             "System sound volume level (0-255)",
+             [this](SettingItem_t& item)
+             {
+                 if (_hal && _hal->speaker())
+                     _hal->speaker()->setVolume(std::stoi(item.value));
+             }},
             {"boot_sound", "Boot sound", TYPE_BOOL, "true", "true", "", "", "Play boot sound on startup"},
         };
 
@@ -145,12 +159,64 @@ namespace SETTINGS
         SettingGroup_t export_group;
         export_group.name = "Export (SD card)";
         export_group.items = {};
+        export_group.callback = [this](SETTINGS::SettingGroup_t& group)
+        {
+            if (!_hal)
+                return;
+            bool sdcard_mounted = _hal->sdcard()->is_mounted();
+            if (!sdcard_mounted)
+                _hal->sdcard()->mount(false);
+            if (_hal->sdcard()->is_mounted())
+            {
+                exportToFile(SETTINGS_FILE_NAME);
+                if (!sdcard_mounted)
+                    _hal->sdcard()->eject();
+                UTILS::UI::show_message_dialog(_hal, "Success", "Settings saved to: " + SETTINGS_FILE_NAME, 0);
+            }
+            else
+            {
+                UTILS::UI::show_message_dialog(_hal, "Error", "Failed to mount SD card", 0);
+            }
+        };
+
         SettingGroup_t import_group;
         import_group.name = "Import (SD card)";
         import_group.items = {};
+        import_group.callback = [this](SETTINGS::SettingGroup_t& group)
+        {
+            if (!_hal)
+                return;
+            bool sdcard_mounted = _hal->sdcard()->is_mounted();
+            if (!sdcard_mounted)
+                _hal->sdcard()->mount(false);
+            if (_hal->sdcard()->is_mounted())
+            {
+                importFromFile(SETTINGS_FILE_NAME);
+                if (!sdcard_mounted)
+                    _hal->sdcard()->eject();
+#if HAL_USE_WIFI
+                UTILS::UI::show_progress(_hal, "WiFi", -1, "Stopping...");
+                delay(500);
+                _hal->wifi()->init();
+                if (getBool("wifi", "enabled"))
+                {
+                    UTILS::UI::show_progress(_hal, "WiFi", -1, "Starting...");
+                    delay(500);
+                    _hal->wifi()->connect();
+                }
+#endif
+                UTILS::UI::show_message_dialog(_hal, "Success", "Loaded from: " + SETTINGS_FILE_NAME, 0);
+            }
+            else
+            {
+                UTILS::UI::show_error_dialog(_hal, "Error", "Failed to mount SD card", "OK");
+            }
+        };
 
         _metadata = {wifi_group, sys_group, gemini_group, elevenlabs_group, deepgram_group, export_group, import_group};
     }
+
+    void Settings::setHal(HAL::Hal* hal) { _hal = hal; }
 
     Settings::~Settings()
     {
@@ -182,32 +248,39 @@ namespace SETTINGS
 
     bool Settings::_initNvs()
     {
-        esp_err_t err = nvs_flash_init_partition(NVS_PARTITION);
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+        for (const char* const* p = NVS_PARTITIONS; *p; ++p)
         {
-            ESP_LOGW(TAG, "NVS partition was truncated or new version found, erasing...");
-            err = nvs_flash_erase_partition(NVS_PARTITION);
-            if (err != ESP_OK)
+            esp_err_t err = nvs_flash_init_partition(*p);
+            if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
             {
-                ESP_LOGE(TAG, "Failed to erase NVS partition: %s", esp_err_to_name(err));
-                return false;
+                ESP_LOGW(TAG, "NVS partition '%s' truncated or new version, erasing...", *p);
+                err = nvs_flash_erase_partition(*p);
+                if (err == ESP_OK)
+                    err = nvs_flash_init_partition(*p);
             }
-            err = nvs_flash_init_partition(NVS_PARTITION);
+            if (err == ESP_OK)
+            {
+                _active_partition = *p;
+                ESP_LOGI(TAG, "NVS initialized on partition '%s'", *p);
+                return true;
+            }
+            ESP_LOGW(TAG, "Partition '%s' failed: %s", *p, esp_err_to_name(err));
         }
-        if (err != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Failed to initialize NVS: %s", esp_err_to_name(err));
-        }
-        return err == ESP_OK;
+
+        ESP_LOGE(TAG, "Failed to initialize NVS on any partition");
+        return false;
     }
 
     void Settings::_deinitNvs()
     {
-        esp_err_t err = nvs_flash_deinit_partition(NVS_PARTITION);
+        if (!_active_partition)
+            return;
+        esp_err_t err = nvs_flash_deinit_partition(_active_partition);
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "Failed to deinitialize NVS: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "Failed to deinitialize NVS partition '%s': %s", _active_partition, esp_err_to_name(err));
         }
+        _active_partition = nullptr;
     }
 
     std::string Settings::_makeKey(const std::string& ns, const std::string& key) const
@@ -237,12 +310,8 @@ namespace SETTINGS
     {
         for (const auto& group : _metadata)
         {
-            if (group.items.empty())
-            {
-                continue;
-            }
             nvs_handle_t nvs_handle;
-            esp_err_t err = nvs_open_from_partition(NVS_PARTITION, group.nvs_namespace.c_str(), NVS_READONLY, &nvs_handle);
+            esp_err_t err = nvs_open_from_partition(_active_partition, group.nvs_namespace.c_str(), NVS_READONLY, &nvs_handle);
             if (err != ESP_OK)
             {
                 ESP_LOGE(TAG, "Error opening NVS namespace %s", group.nvs_namespace.c_str());
@@ -364,7 +433,7 @@ namespace SETTINGS
         _cache[cache_key] = cached_value;
 
         nvs_handle_t nvs_handle;
-        esp_err_t err = nvs_open_from_partition(NVS_PARTITION, ns.c_str(), NVS_READWRITE, &nvs_handle);
+        esp_err_t err = nvs_open_from_partition(_active_partition, ns.c_str(), NVS_READWRITE, &nvs_handle);
         if (err != ESP_OK)
         {
             return false;
@@ -392,7 +461,7 @@ namespace SETTINGS
         _cache[cache_key] = cached_value;
 
         nvs_handle_t nvs_handle;
-        esp_err_t err = nvs_open_from_partition(NVS_PARTITION, ns.c_str(), NVS_READWRITE, &nvs_handle);
+        esp_err_t err = nvs_open_from_partition(_active_partition, ns.c_str(), NVS_READWRITE, &nvs_handle);
         if (err != ESP_OK)
         {
             return false;
@@ -420,7 +489,7 @@ namespace SETTINGS
         _cache[cache_key] = cached_value;
 
         nvs_handle_t nvs_handle;
-        esp_err_t err = nvs_open_from_partition(NVS_PARTITION, ns.c_str(), NVS_READWRITE, &nvs_handle);
+        esp_err_t err = nvs_open_from_partition(_active_partition, ns.c_str(), NVS_READWRITE, &nvs_handle);
         if (err != ESP_OK)
         {
             return false;
@@ -439,7 +508,8 @@ namespace SETTINGS
         for (const auto& group : _metadata)
         {
             nvs_handle_t nvs_handle;
-            esp_err_t err = nvs_open_from_partition(NVS_PARTITION, group.nvs_namespace.c_str(), NVS_READWRITE, &nvs_handle);
+            esp_err_t err =
+                nvs_open_from_partition(_active_partition, group.nvs_namespace.c_str(), NVS_READWRITE, &nvs_handle);
             if (err != ESP_OK)
             {
                 success = false;
@@ -487,11 +557,47 @@ namespace SETTINGS
     bool Settings::exportToFile(const std::string& filename) const
     {
         ESP_LOGI(TAG, "Exporting settings to %s", filename.c_str());
-        std::ofstream outfile(filename);
-        if (!outfile.is_open())
+
+        std::map<std::string, std::string> existing_settings;
+
+        std::ifstream infile(filename);
+        if (infile.is_open())
         {
-            ESP_LOGE(TAG, "Failed to open file %s for writing", filename.c_str());
-            return false;
+            std::string line;
+            while (std::getline(infile, line))
+            {
+                line.erase(0, line.find_first_not_of(" \t\n\r"));
+                line.erase(line.find_last_not_of(" \t\n\r") + 1);
+
+                if (line.empty() || line[0] == '#')
+                    continue;
+
+                size_t equals_pos = line.find('=');
+                if (equals_pos == std::string::npos)
+                {
+                    ESP_LOGW(TAG, "Skipping invalid line during export pre-read: %s", line.c_str());
+                    continue;
+                }
+
+                std::string cache_key = line.substr(0, equals_pos);
+                std::string value_str = line.substr(equals_pos + 1);
+
+                size_t separator_pos = cache_key.find('-');
+                if (separator_pos == std::string::npos)
+                {
+                    ESP_LOGW(TAG,
+                             "Invalid key format (missing namespace separator '-') in existing file: %s",
+                             cache_key.c_str());
+                    continue;
+                }
+                existing_settings[cache_key] = value_str;
+            }
+            infile.close();
+            ESP_LOGI(TAG, "Read file %s. Found %d settings", filename.c_str(), existing_settings.size());
+        }
+        else
+        {
+            ESP_LOGI(TAG, "File %s does not exist, creating new", filename.c_str());
         }
 
         for (const auto& group : _metadata)
@@ -506,43 +612,52 @@ namespace SETTINGS
                 if (it == _cache.end())
                 {
                     ESP_LOGW(TAG, "Setting %s not found in cache during export, skipping", cache_key.c_str());
-                    continue; // Should not happen if loadSettings was successful
+                    continue;
                 }
 
-                outfile << cache_key << "=";
+                std::string str_val;
                 switch (item.type)
                 {
                 case TYPE_BOOL:
-                    outfile << (it->second.bool_val ? "true" : "false");
+                    str_val = (it->second.bool_val ? "true" : "false");
                     break;
                 case TYPE_NUMBER:
-                    outfile << it->second.num_val;
+                    str_val = std::to_string(it->second.num_val);
                     break;
                 case TYPE_STRING:
-                    // Basic escaping for newline characters in strings
+                {
+                    std::string escaped_str;
+                    for (char c : it->second.str_val)
                     {
-                        std::string escaped_str;
-                        for (char c : it->second.str_val)
+                        if (c == '\n')
                         {
-                            if (c == '\n')
-                            {
-                                escaped_str += "\\n";
-                            }
-                            else
-                            {
-                                escaped_str += c;
-                            }
+                            escaped_str += "\\n";
                         }
-                        outfile << escaped_str;
+                        else
+                        {
+                            escaped_str += c;
+                        }
                     }
-                    break;
-                default: // Should not happen
+                    str_val = escaped_str;
+                }
+                break;
+                default:
                     break;
                 }
-                outfile << std::endl;
+                existing_settings[cache_key] = str_val;
             }
         }
 
+        std::ofstream outfile(filename);
+        if (!outfile.is_open())
+        {
+            ESP_LOGE(TAG, "Failed to open file %s for writing", filename.c_str());
+            return false;
+        }
+        for (const auto& [key, value] : existing_settings)
+        {
+            outfile << key << "=" << value << std::endl;
+        }
         outfile.close();
         ESP_LOGI(TAG, "Settings successfully exported to %s", filename.c_str());
         return true;
@@ -559,17 +674,16 @@ namespace SETTINGS
         }
 
         std::string line;
-        bool success = false; // Track if at least one setting is imported
+        bool success = false;
         int line_num = 0;
 
         while (std::getline(infile, line))
         {
             line_num++;
-            // Trim leading/trailing whitespace (optional but good practice)
             line.erase(0, line.find_first_not_of(" \t\n\r"));
             line.erase(line.find_last_not_of(" \t\n\r") + 1);
 
-            if (line.empty() || line[0] == '#') // Skip empty lines and comments
+            if (line.empty() || line[0] == '#')
                 continue;
 
             size_t equals_pos = line.find('=');
@@ -582,7 +696,6 @@ namespace SETTINGS
             std::string cache_key = line.substr(0, equals_pos);
             std::string value_str = line.substr(equals_pos + 1);
 
-            // Find the separator '-' to split namespace and key
             size_t separator_pos = cache_key.find('-');
             if (separator_pos == std::string::npos)
             {
@@ -595,7 +708,6 @@ namespace SETTINGS
             std::string ns = cache_key.substr(0, separator_pos);
             std::string key = cache_key.substr(separator_pos + 1);
 
-            // Find the item metadata to know the type
             const SettingItem_t* item = _findItem(ns, key);
             if (!item)
             {
@@ -621,9 +733,7 @@ namespace SETTINGS
                              value_str.c_str(),
                              cache_key.c_str(),
                              line_num);
-                    val = (item->default_val == "true"); // Fallback or skip?
-                    // Decide if we should still attempt to set or skip entirely
-                    // For now, we'll log a warning but proceed with default if parse fails
+                    val = (item->default_val == "true");
                 }
                 import_ok = setBool(ns, key, val);
                 break;
@@ -636,14 +746,13 @@ namespace SETTINGS
             }
             case TYPE_STRING:
             {
-                // Basic unescaping for newline characters
                 std::string unescaped_str;
                 for (size_t i = 0; i < value_str.length(); ++i)
                 {
                     if (value_str[i] == '\\' && i + 1 < value_str.length() && value_str[i + 1] == 'n')
                     {
                         unescaped_str += '\n';
-                        i++; // Skip the 'n'
+                        i++;
                     }
                     else
                     {
@@ -674,13 +783,14 @@ namespace SETTINGS
         if (success)
         {
             ESP_LOGI(TAG, "Settings successfully imported from %s", filename.c_str());
+            if (_hal && _hal->speaker())
+                _hal->speaker()->setVolume(getNumber("system", "volume"));
         }
         else
         {
             ESP_LOGW(TAG, "No settings were imported from %s", filename.c_str());
         }
 
-        // Note: Settings are saved to NVS individually by setBool/Number/String methods
         return success;
     }
 

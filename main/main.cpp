@@ -19,6 +19,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Starting M5Gemini application");
     settings.init();
     hal.init();
+    settings.setHal(&hal);
     GeminiApp app(&hal);
     app.init();
     // Main loop

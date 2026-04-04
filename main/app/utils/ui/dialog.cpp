@@ -1,13 +1,58 @@
 #include "dialog.h"
 #include "esp_log.h"
-#include "../anim/hl_text.h"
+#include "app/utils/anim/hl_text.h"
+#include "app/utils/screenshot/screenshot_tools.h"
+#include "lgfx/v1/misc/enum.hpp"
+#include "app/utils/text/text_utils.h"
+#include "key_repeat.h"
+#include "draw_helper.h"
 
 static const char* TAG = "DIALOG";
-static bool is_start = false;
 static bool is_repeat = false;
-// keyboard constants
-#define KEY_HOLD_MS 500
-#define KEY_REPEAT_MS 50
+static uint32_t next_fire_ts = 0xFFFFFFFF;
+using UTILS::TEXT::utf8_byte_offset;
+using UTILS::TEXT::utf8_char_len;
+using UTILS::TEXT::utf8_strlen;
+using UTILS::TEXT::utf8_substr;
+
+// Keyboard layout definitions
+static constexpr size_t KBD_KEY_COUNT = 47;
+
+struct KbdLayout
+{
+    const char* const chars[KBD_KEY_COUNT];       // lowercase / normal
+    const char* const chars_shift[KBD_KEY_COUNT]; // uppercase / shifted
+    const char* label_lower;                      // mode indicator (lowercase)
+    const char* label_upper;                      // mode indicator (uppercase)
+    uint32_t color_lower;                         // indicator color (lowercase)
+    uint32_t color_upper;                         // indicator color (uppercase)
+};
+
+static const KbdLayout kbd_layouts[] = {
+    // English
+    {{"1",  "2", "3", "4", "5", "6", "7", "8", "9", "0", "_", "=", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]",
+      "\\", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "z", "x", "c", "v", "b", "n", "m", ",", ".", "/", " "},
+     {"!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "-", "+",  "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "{", "}",
+      "|", "A", "S", "D", "F", "G", "H", "J", "K", "L", ":", "\"", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "?", " "},
+     "abc",
+     "ABC",
+     THEME_COLOR_KEYBOARD_LOWER,
+     THEME_COLOR_KEYBOARD_UPPER},
+    // Ukrainian (ЙЦУКЕН)
+    {{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "й", "ц", "у", "к", "е", "н", "г", "ш", "щ", "з", "х", "ї",
+      "ґ", "ф", "і", "в", "а", "п", "р", "о", "л", "д", "ж", "є", "я", "ч", "с", "м", "и", "т", "ь", "б", "ю", ".", " "},
+     {"!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "+", "Й", "Ц", "У", "К", "Е", "Н", "Г", "Ш", "Щ", "З", "Х", "Ї",
+      "Ґ", "Ф", "І", "В", "А", "П", "Р", "О", "Л", "Д", "Ж", "Є", "Я", "Ч", "С", "М", "И", "Т", "Ь", "Б", "Ю", ",", " "},
+     "абв",
+     "АБВ",
+     THEME_COLOR_KEYBOARD_LOWER,
+     THEME_COLOR_KEYBOARD_UPPER},
+};
+
+static constexpr int KBD_LAYOUT_COUNT = sizeof(kbd_layouts) / sizeof(kbd_layouts[0]);
+
+// Keyboard layout state (persists across dialog invocations)
+static int kbd_layout = 0;
 
 using namespace UTILS::HL_TEXT;
 namespace UTILS
@@ -34,8 +79,8 @@ namespace UTILS
                         uint8_t scroll_speed,
                         uint32_t scroll_pause_ms)
         {
-            ESP_LOGI(TAG, "show_dialog: title=%s, message=%s", title.c_str(), message.c_str());
-            // set brightness to settings value
+            ESP_LOGW(TAG, "show_dialog: title=%s, message=%s", title.c_str(), message.c_str());
+            hal->displayWakeup();
             int brightness = hal->settings()->getNumber("system", "brightness");
             hal->display()->setBrightness(brightness == 0 ? 100 : brightness);
             // set font
@@ -64,7 +109,7 @@ namespace UTILS
             if (title_fits)
             {
                 // draw title
-                hal->canvas()->setTextColor(title_color, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(title_color);
                 hal->canvas()->drawCenterString(title.c_str(), dialog_x + DIALOG_WIDTH / 2, dialog_y + 10);
             }
             else
@@ -79,7 +124,7 @@ namespace UTILS
             if (message_fits)
             {
                 // draw message
-                hal->canvas()->setTextColor(message_color, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(message_color);
                 hal->canvas()->drawCenterString(message.c_str(), dialog_x + DIALOG_WIDTH / 2, dialog_y + 10 + VERTICAL_SPACING);
             }
             else
@@ -96,11 +141,13 @@ namespace UTILS
             if (close_timeout_ms > 0)
             {
                 hal->canvas()->setFont(FONT_10);
-                hal->canvas()->setTextColor(TFT_DARKGREY, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(TFT_DARKGREY);
                 hal->canvas()->drawCenterString("[DEL] CANCEL", dialog_x + DIALOG_WIDTH / 2, dialog_y + DIALOG_HEIGHT - 10);
                 hal->canvas()->setFont(FONT_16);
             }
             bool need_update = true;
+            is_repeat = false;
+            next_fire_ts = 0xFFFFFFFF;
             while (true)
             {
                 // Handle timeout
@@ -138,14 +185,14 @@ namespace UTILS
                 }
                 else if (close_timeout_ms > 0)
                 {
-                    hal->canvas()->setTextColor(message_color, THEME_COLOR_BG);
+                    hal->canvas()->setTextColor(message_color);
                     hal->canvas()->drawCenterString(
                         std::format("{} {} sec", message, (uint32_t)((close_timeout_ms - (now - start_time)) / 1000)).c_str(),
                         dialog_x + DIALOG_WIDTH / 2,
                         dialog_y + 10 + VERTICAL_SPACING);
                     need_update = true;
                 }
-                if (hal->home_button()->isPressed())
+                if (hal->home_button()->is_pressed())
                 {
                     if (!title_fits)
                     {
@@ -164,13 +211,9 @@ namespace UTILS
                 {
                     if (hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_LEFT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
+                        if (key_repeat_check(is_repeat, next_fire_ts, millis()))
                         {
-                            is_start = !is_repeat;
-                            is_repeat = true;
                             hal->playNextSound();
-
                             selected_button--;
                             if (selected_button == -1)
                             {
@@ -181,13 +224,9 @@ namespace UTILS
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_RIGHT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
+                        if (key_repeat_check(is_repeat, next_fire_ts, millis()))
                         {
-                            is_start = !is_repeat;
-                            is_repeat = true;
                             hal->playNextSound();
-
                             selected_button++;
                             if (selected_button == buttons.size())
                             {
@@ -200,7 +239,6 @@ namespace UTILS
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_ENTER);
-                        hal->playLastSound();
 
                         if (!title_fits)
                         {
@@ -216,7 +254,6 @@ namespace UTILS
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_BACKSPACE);
-                        hal->playLastSound();
 
                         if (!title_fits)
                         {
@@ -232,7 +269,6 @@ namespace UTILS
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_ESC);
-                        hal->playLastSound();
 
                         if (!title_fits)
                         {
@@ -246,7 +282,9 @@ namespace UTILS
                     }
                 }
                 else
+                {
                     is_repeat = false;
+                }
 
                 if (need_update)
                 {
@@ -269,14 +307,14 @@ namespace UTILS
                             ->drawRoundRect(btn_x, buttons_y, BUTTON_WIDTH, BUTTON_HEIGHT, BUTTON_CORNER_RADIUS, TFT_WHITE);
 
                         // Draw button text
-                        hal->canvas()->setTextColor(is_selected ? TFT_BLACK : buttons[i].text_color,
-                                                    is_selected ? THEME_COLOR_BG_SELECTED : buttons[i].bg_color);
+                        hal->canvas()->setTextColor(is_selected ? TFT_BLACK : buttons[i].text_color);
                         hal->canvas()->drawCenterString(buttons[i].text.c_str(), btn_x + BUTTON_WIDTH / 2, buttons_y + 2);
                     }
 
                     hal->canvas_update();
                     need_update = false;
                 }
+                UTILS::SCREENSHOT_TOOLS::check_and_handle_screenshot(hal, nullptr);
                 delay(5);
             }
         }
@@ -349,7 +387,7 @@ namespace UTILS
             }
 
             // Draw title at top of dialog
-            hal->canvas()->setTextColor(TFT_CYAN, THEME_COLOR_BG);
+            hal->canvas()->setTextColor(TFT_CYAN);
             hal->canvas()->drawCenterString(display_title.c_str(), dialog_x + DIALOG_WIDTH / 2, dialog_y + 10);
 
             // Progress bar dimensions
@@ -368,21 +406,10 @@ namespace UTILS
                 {
                     hal->canvas()->fillRoundRect(bar_x, bar_y, fill_width, bar_h, 4, THEME_COLOR_BG_SELECTED);
                 }
-                // create sprite for transparent text
-                LGFX_Sprite* text = new LGFX_Sprite(hal->canvas());
-                if (text)
-                {
-                    text->createSprite(bar_w, bar_h);
-                    text->fillScreen(TFT_TRANSPARENT);
-                    // Draw percentage text centered in progress bar
-                    text->setTextColor(fill_width > bar_w / 2 ? TFT_BLACK : TFT_WHITE, TFT_TRANSPARENT);
-                    // + 1);
-                    text->setFont(FONT_16);
-                    text->drawCenterString(std::format("{}%", progress).c_str(), text->width() / 2, 1);
-                    text->pushSprite(hal->canvas(), bar_x, bar_y, TFT_TRANSPARENT);
-                    text->deleteSprite();
-                    delete text;
-                }
+                // Draw percentage text centered in progress bar
+                hal->canvas()->setTextColor(fill_width > bar_w / 2 ? TFT_BLACK : TFT_WHITE);
+                hal->canvas()->setFont(FONT_16);
+                hal->canvas()->drawCenterString(std::format("{}%", progress).c_str(), bar_x + bar_w / 2, bar_y + 1);
             }
             else
             {
@@ -402,6 +429,7 @@ namespace UTILS
                 if (bar)
                 {
                     bar->createSprite(bar_w + bar_h * 2, bar_h);
+                    bar->setEmojiCallback(hal->canvas()->getEmojiCallback());
                     bar->fillScreen(THEME_COLOR_BG);
                     // frame wider then
                     bar->drawRoundRect(bar_h, 0, bar_w, bar_h, 4, THEME_COLOR_BG_SELECTED);
@@ -413,7 +441,7 @@ namespace UTILS
                 }
             }
             // Draw status message below progress bar
-            hal->canvas()->setTextColor(TFT_LIGHTGREY, THEME_COLOR_BG);
+            hal->canvas()->setTextColor(TFT_LIGHTGREY);
             std::string status = message;
             if (hal->canvas()->textWidth(status.c_str()) > DIALOG_WIDTH - 20)
             {
@@ -457,12 +485,14 @@ namespace UTILS
             // create hint highlight context
             HLTextContext_t hint_ctx;
             hl_text_init(&hint_ctx, hal->canvas(), 20, 1500);
+            is_repeat = false;
+            next_fire_ts = 0xFFFFFFFF;
             while (editing)
             {
                 hal->canvas()->fillScreen(THEME_COLOR_BG);
 
                 // Draw title
-                hal->canvas()->setTextColor(TFT_CYAN, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(TFT_CYAN);
                 hal->canvas()->setFont(FONT_16);
                 hal->canvas()->drawString(title.c_str(), 5, 5);
 
@@ -495,7 +525,7 @@ namespace UTILS
 
                 // Draw visible text
                 std::string visible_text = input.substr(scroll_offset, max_visible_chars);
-                hal->canvas()->setTextColor(TFT_WHITE, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(TFT_WHITE);
                 hal->canvas()->drawString(visible_text.c_str(), box_x + 5, box_y + 5);
 
                 // Draw cursor
@@ -507,20 +537,17 @@ namespace UTILS
 
                 // Draw min/max hint
                 hal->canvas()->setFont(FONT_10);
-                hal->canvas()->setTextColor(TFT_DARKGREY, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(TFT_DARKGREY);
                 hal->canvas()->drawString(std::format("Range: {} to {}", min_value, max_value).c_str(),
                                           box_x,
                                           box_y + box_h + 5);
-
+                // Handle input
                 hal->keyboard()->updateKeyList();
                 hal->keyboard()->updateKeysState();
                 auto keys_state = hal->keyboard()->keysState();
                 // Draw controls hint
-                // hal->canvas()->drawCenterString(keys_state.fn ? "[DEL]" : "[UP] [DOWN] [LEFT] [RIGHT] [DEL] [ENTER]",
-                //                                 box_x + box_w / 2,
-                //                                 hal->canvas()->height() - 15);
                 hl_text_render(&hint_ctx,
-                               keys_state.fn ? "[DEL]" : "[UP] [DOWN] [LEFT] [RIGHT] [DEL] [ENTER]",
+                               keys_state.fn ? "[DEL]" : "[\u2191][\u2193][\u2190][\u2192] [DEL] [ESC] [ENTER]",
                                box_x,
                                hal->canvas()->height() - 12,
                                TFT_DARKGREY,
@@ -528,8 +555,9 @@ namespace UTILS
                                THEME_COLOR_BG);
 
                 hal->canvas_update();
+                UTILS::SCREENSHOT_TOOLS::check_and_handle_screenshot(hal, nullptr);
 
-                if (hal->home_button()->isPressed())
+                if (hal->home_button()->is_pressed())
                 {
                     result = false;
                     break;
@@ -544,53 +572,40 @@ namespace UTILS
                         {
                             hal->playNextSound();
                             hal->keyboard()->waitForRelease(KEY_NUM_BACKSPACE);
-                            hal->playLastSound();
                             result = false;
                             break;
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_BACKSPACE))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_BACKSPACE, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
-                            if (cursor_pos > 0)
-                            {
-                                cursor_pos--;
-                                if (cursor_pos < input.length())
-                                    input.erase(cursor_pos, 1);
-                            }
+                        hal->playNextSound();
+                        if (cursor_pos > 0)
+                        {
+                            cursor_pos--;
+                            if (cursor_pos < input.length())
+                                input.erase(cursor_pos, 1);
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_LEFT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
-                            if (cursor_pos > 0)
-                                cursor_pos--;
-                        }
+                        hal->playNextSound();
+                        if (cursor_pos > 0)
+                            cursor_pos--;
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_RIGHT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
-                            if (cursor_pos < input.length())
-                                cursor_pos++;
-                        }
+                        hal->playNextSound();
+                        if (cursor_pos < input.length())
+                            cursor_pos++;
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_UP))
                     {
@@ -645,6 +660,13 @@ namespace UTILS
                             }
                         }
                     }
+                    else if (hal->keyboard()->isKeyPressing(KEY_NUM_ESC))
+                    {
+                        hal->playNextSound();
+                        hal->keyboard()->waitForRelease(KEY_NUM_ESC);
+                        result = false;
+                        break;
+                    }
                     else
                     {
                         // Handle numeric input
@@ -653,17 +675,12 @@ namespace UTILS
                         {
                             if (hal->keyboard()->isKeyPressing(key_nums[i]))
                             {
-                                if (cursor_pos == 0 && chars[i] == '0')
-                                    continue; // Prevent leading zeros
-                                if (!is_repeat ||
-                                    !hal->keyboard()->waitForRelease(key_nums[i], is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                                {
-                                    is_start = !is_repeat;
-                                    is_repeat = true;
-                                    hal->playNextSound();
-                                    input.insert(cursor_pos, 1, chars[i]);
-                                    cursor_pos++;
-                                }
+                                if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                                    break;
+
+                                hal->playNextSound();
+                                input.insert(cursor_pos, 1, chars[i]);
+                                cursor_pos++;
                                 break;
                             }
                         }
@@ -672,21 +689,20 @@ namespace UTILS
                         if (!is_negative && cursor_pos == 0 && hal->keyboard()->isKeyPressing(KEY_NUM_UNDERSCORE) &&
                             min_value < 0)
                         {
-                            if (!is_repeat ||
-                                !hal->keyboard()->waitForRelease(KEY_NUM_UNDERSCORE, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                            {
-                                is_start = !is_repeat;
-                                is_repeat = true;
-                                hal->playNextSound();
-                                input.insert(0, 1, '-');
-                                cursor_pos++;
-                                is_negative = true;
-                            }
+                            if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                                break;
+
+                            hal->playNextSound();
+                            input.insert(0, 1, '-');
+                            cursor_pos++;
+                            is_negative = true;
                         }
                     }
                 }
                 else
+                {
                     is_repeat = false;
+                }
 
                 delay(5);
             }
@@ -700,9 +716,8 @@ namespace UTILS
             std::string input = value;
             bool editing = true;
             bool result = false;
-            int cursor_pos = input.length();
+            int cursor_pos = utf8_strlen(input);
             int scroll_offset = 0;
-            // bool shift_mode = false;
 
             const uint8_t key_nums[] = {
                 KEY_NUM_1,         KEY_NUM_2,    KEY_NUM_3,    KEY_NUM_4,     KEY_NUM_5,          KEY_NUM_6,
@@ -713,17 +728,18 @@ namespace UTILS
                 KEY_NUM_H,         KEY_NUM_J,    KEY_NUM_K,    KEY_NUM_L,     KEY_NUM_UP,         KEY_NUM_APOSTROPHE,
                 KEY_NUM_Z,         KEY_NUM_X,    KEY_NUM_C,    KEY_NUM_V,     KEY_NUM_B,          KEY_NUM_N,
                 KEY_NUM_M,         KEY_NUM_LEFT, KEY_NUM_DOWN, KEY_NUM_RIGHT, KEY_NUM_SPACE};
-            const std::string keyboard_chars = "1234567890_=qwertyuiop[]\\asdfghjkl;'zxcvbnm,./ ";
-            const std::string keyboard_chars_shift = "!@#$%^&*()-+QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>? ";
+            // Keyboard layouts are defined at file scope (kbd_en, kbd_en_shift, kbd_ua, kbd_ua_shift)
             // create hint highlight context
             HLTextContext_t hint_ctx;
             hl_text_init(&hint_ctx, hal->canvas(), 20, 1500);
+            is_repeat = false;
+            next_fire_ts = 0xFFFFFFFF;
             while (editing)
             {
                 hal->canvas()->fillScreen(THEME_COLOR_BG);
 
                 // Draw title
-                hal->canvas()->setTextColor(TFT_CYAN, THEME_COLOR_BG);
+                hal->canvas()->setTextColor(TFT_CYAN);
                 hal->canvas()->setFont(FONT_16);
                 hal->canvas()->drawString(title.c_str(), 5, 5);
 
@@ -734,34 +750,46 @@ namespace UTILS
                 int box_h = 25;
                 hal->canvas()->drawRect(box_x, box_y, box_w, box_h, TFT_WHITE);
 
-                // Calculate visible portion of text
-                int max_visible_chars = (box_w - 10) / 8;
-                if (input.length() > max_visible_chars)
+                // Calculate visible portion using actual pixel widths
+                int text_area_w = box_w - 10;
+                size_t input_chars = utf8_strlen(input);
+
+                if (cursor_pos < scroll_offset)
+                    scroll_offset = cursor_pos;
+
+                // Advance scroll_offset until cursor fits within visible area
+                while (scroll_offset < cursor_pos)
                 {
-                    if (cursor_pos > scroll_offset + max_visible_chars - 1)
-                    {
-                        scroll_offset = cursor_pos - max_visible_chars + 1;
-                    }
-                    else if (cursor_pos < scroll_offset)
-                    {
-                        scroll_offset = cursor_pos;
-                    }
+                    std::string to_cursor = is_password ? std::string(cursor_pos - scroll_offset, '*')
+                                                        : utf8_substr(input, scroll_offset, cursor_pos - scroll_offset);
+                    if (hal->canvas()->textWidth(to_cursor.c_str()) <= text_area_w)
+                        break;
+                    scroll_offset++;
                 }
-                else
+
+                // Count characters from scroll_offset that fit in the visible area
+                int visible_count = 0;
+                for (int i = scroll_offset; i < (int)input_chars; i++)
                 {
-                    scroll_offset = 0;
+                    std::string test = is_password ? std::string(i - scroll_offset + 1, '*')
+                                                   : utf8_substr(input, scroll_offset, i - scroll_offset + 1);
+                    if (hal->canvas()->textWidth(test.c_str()) > text_area_w)
+                        break;
+                    visible_count = i - scroll_offset + 1;
                 }
 
                 // Draw visible text
                 std::string display_text =
-                    is_password ? std::string(input.length(), '*') : input.substr(scroll_offset, max_visible_chars);
-                hal->canvas()->setTextColor(TFT_WHITE, THEME_COLOR_BG);
+                    is_password ? std::string(visible_count, '*') : utf8_substr(input, scroll_offset, visible_count);
+                hal->canvas()->setTextColor(TFT_WHITE);
                 hal->canvas()->drawString(display_text.c_str(), box_x + 5, box_y + 5);
 
-                // Draw cursor
+                // Draw cursor at measured pixel position
                 if ((millis() / 500) % 2 == 0)
                 {
-                    int cursor_x = box_x + 5 + (cursor_pos - scroll_offset) * 8;
+                    std::string before_cursor = is_password ? std::string(cursor_pos - scroll_offset, '*')
+                                                            : utf8_substr(input, scroll_offset, cursor_pos - scroll_offset);
+                    int cursor_x = box_x + 5 + hal->canvas()->textWidth(before_cursor.c_str());
                     hal->canvas()->drawFastVLine(cursor_x, box_y + 3, box_h - 6, TFT_WHITE);
                 }
                 // Handle input
@@ -771,27 +799,75 @@ namespace UTILS
 
                 // Draw keyboard mode indicator
                 hal->canvas()->setFont(FONT_10);
-                hal->canvas()->setTextColor(keys_state.fn      ? TFT_ORANGE
-                                            : keys_state.shift ? TFT_BLUE
-                                                               : TFT_DARKGREY,
-                                            THEME_COLOR_BG);
-                hal->canvas()->drawString(keys_state.fn ? "Fn" : keys_state.shift ? "ABC" : "abc", box_x, box_y + box_h + 5);
+                const auto& layout = kbd_layouts[kbd_layout];
+                const char* mode_label = keys_state.fn ? "Fn" : keys_state.shift ? layout.label_upper : layout.label_lower;
+                uint32_t mode_color = keys_state.fn      ? THEME_COLOR_KEYBOARD_FN
+                                      : keys_state.shift ? layout.color_upper
+                                                         : layout.color_lower;
+                hal->canvas()->setTextColor(mode_color);
+                hal->canvas()->drawString(mode_label, box_x, box_y + box_h + 5);
                 // draw number of symbols
-                hal->canvas()->setTextColor(TFT_DARKGREY, THEME_COLOR_BG);
-                hal->canvas()->drawRightString(std::format("{}", input.length()).c_str(), box_x + box_w - 5, box_y + box_h + 5);
+                hal->canvas()->setTextColor(TFT_DARKGREY);
+                hal->canvas()->drawRightString(std::format("{} / {}", input.size(), max_length).c_str(),
+                                               box_x + box_w - 2,
+                                               box_y + box_h + 5);
+                // draw keyboard fo non-latin layout
+                if (kbd_layout != 0 && !keys_state.fn)
+                {
+                    const char* const* lat = kbd_layouts[0].chars_shift; // using uppercase more visually readable
+                    const char* const* cyr = kbd_layouts[kbd_layout].chars_shift;
+                    // const char* const* en_ref = keys_state.shift ? kbd_layouts[0].chars_shift : kbd_layouts[0].chars;
+                    // keys_state.shift ? kbd_layouts[kbd_layout].chars_shift : kbd_layouts[kbd_layout].chars;
+                    static const int max_keys = 13;
+                    static const int rk[] = {12, 13, 12, 11};
+                    static const int ro[] = {0, 12, 24, 36};
+                    int hy = box_y + box_h + 16;
+                    int rh = 10;
+                    int x_off = 38;
+                    int sw = hal->canvas()->width() - x_off * 2;
 
-                // Draw controls hint
-                hl_text_render(&hint_ctx,
-                               keys_state.fn ? "[LEFT] [RIGHT] [UP] [DOWN] [DEL]" : "[Aa] [Fn] [DEL] [ENTER]",
-                               box_x,
-                               hal->canvas()->height() - 12,
-                               TFT_DARKGREY,
-                               TFT_WHITE,
-                               THEME_COLOR_BG);
+                    for (int r = 1; r < 4; r++)
+                    {
+                        int nk = rk[r];
+                        int cw = sw / max_keys;
+                        int y = hy + (r - 1) * rh;
+
+                        for (int k = 0; k < nk; k++)
+                        {
+                            int idx = ro[r] + k;
+                            int x = x_off + k * cw;
+
+                            // if (strcmp(en_ref[idx], cyr[idx]) == 0)
+                            //     continue;
+
+                            hal->canvas()->setFont(FONT_10);
+                            hal->canvas()->setTextColor(TFT_WHITE);
+                            hal->canvas()->drawString(lat[idx], x, y);
+
+                            hal->canvas()->setFont(FONT_12);
+                            hal->canvas()->setTextColor(THEME_COLOR_KEYBOARD_TEXT);
+                            hal->canvas()->drawString(cyr[idx], x + 4, y + 1);
+                        }
+                    }
+                    // draw rect
+                    hal->canvas()->drawRoundRect(x_off - 8, hy - 2, sw + 4, rh * 3 + 7, 4, TFT_DARKGREY);
+                }
+                // else
+                {
+                    hl_text_render(&hint_ctx,
+                                   keys_state.fn ? "[\u2191][\u2193][\u2190][\u2192] [DEL]"
+                                                 : "[Aa] [Fn] [OPT] [DEL] [ESC] [ENTER]",
+                                   box_x,
+                                   hal->canvas()->height() - 9,
+                                   TFT_DARKGREY,
+                                   TFT_WHITE,
+                                   THEME_COLOR_BG);
+                }
 
                 hal->canvas_update();
+                UTILS::SCREENSHOT_TOOLS::check_and_handle_screenshot(hal, nullptr);
 
-                if (hal->home_button()->isPressed())
+                if (hal->home_button()->is_pressed())
                 {
                     result = false;
                     break;
@@ -804,33 +880,27 @@ namespace UTILS
                             is_repeat = false;
                         if (hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
                         {
-                            if (!is_repeat ||
-                                !hal->keyboard()->waitForRelease(KEY_NUM_LEFT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                            {
-                                is_start = !is_repeat;
-                                is_repeat = true;
-                                hal->playNextSound();
-                                if (cursor_pos > 0)
-                                    cursor_pos--;
-                            }
+                            if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                                continue;
+
+                            hal->playNextSound();
+                            if (cursor_pos > 0)
+                                cursor_pos--;
                         }
                         else if (hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
                         {
-                            if (!is_repeat ||
-                                !hal->keyboard()->waitForRelease(KEY_NUM_RIGHT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                            {
-                                is_start = !is_repeat;
-                                is_repeat = true;
-                                hal->playNextSound();
-                                if (cursor_pos < input.length())
-                                    cursor_pos++;
-                            }
+                            if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                                continue;
+
+                            hal->playNextSound();
+                            if (cursor_pos < (int)utf8_strlen(input))
+                                cursor_pos++;
                         }
                         else if (hal->keyboard()->isKeyPressing(KEY_NUM_UP))
                         {
                             hal->playNextSound();
                             hal->keyboard()->waitForRelease(KEY_NUM_UP);
-                            cursor_pos = input.length();
+                            cursor_pos = utf8_strlen(input);
                         }
                         else if (hal->keyboard()->isKeyPressing(KEY_NUM_DOWN))
                         {
@@ -842,24 +912,22 @@ namespace UTILS
                         {
                             hal->playNextSound();
                             hal->keyboard()->waitForRelease(KEY_NUM_BACKSPACE);
-                            hal->playLastSound();
                             result = false;
                             break;
                         }
                     } // end of fn mode
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_BACKSPACE))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_BACKSPACE, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
+
+                        hal->playNextSound();
+                        if (cursor_pos > 0)
                         {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
-                            if (cursor_pos > 0)
-                            {
-                                cursor_pos--;
-                                input.erase(cursor_pos, 1);
-                            }
+                            cursor_pos--;
+                            size_t byte_off = utf8_byte_offset(input, cursor_pos);
+                            int char_bytes = utf8_char_len((unsigned char)input[byte_off]);
+                            input.erase(byte_off, char_bytes);
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_ENTER))
@@ -874,38 +942,43 @@ namespace UTILS
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_ESC);
-                        hal->playLastSound();
                         result = false;
                         break;
                     }
+                    else if (hal->keyboard()->isKeyPressing(KEY_NUM_OPT))
+                    {
+                        hal->playNextSound();
+                        hal->keyboard()->waitForRelease(KEY_NUM_OPT);
+                        kbd_layout = (kbd_layout + 1) % KBD_LAYOUT_COUNT;
+                    }
                     else
                     {
-                        // Handle character input
-                        const std::string& chars = keys_state.shift ? keyboard_chars_shift : keyboard_chars;
+                        // Handle character input - select layout
+                        const char* const* chars =
+                            keys_state.shift ? kbd_layouts[kbd_layout].chars_shift : kbd_layouts[kbd_layout].chars;
                         for (size_t i = 0; i < sizeof(key_nums); i++)
                         {
                             if (hal->keyboard()->isKeyPressing(key_nums[i]))
                             {
-                                if (!is_repeat ||
-                                    !hal->keyboard()->waitForRelease(key_nums[i], is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                                {
-                                    is_start = !is_repeat;
-                                    is_repeat = true;
-                                    hal->playNextSound();
-                                    if (input.length() < max_length)
-                                    {
-                                        input.insert(cursor_pos, 1, chars[i]);
-                                        cursor_pos++;
-                                    }
+                                if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
                                     break;
+
+                                hal->playNextSound();
+                                if (input.size() < (size_t)max_length)
+                                {
+                                    size_t byte_off = utf8_byte_offset(input, cursor_pos);
+                                    input.insert(byte_off, chars[i]);
+                                    cursor_pos++;
                                 }
+                                break;
                             }
                         }
                     }
                 }
                 else
+                {
                     is_repeat = false;
-                // release the task
+                }
                 delay(5);
             }
             hl_text_free(&hint_ctx);
@@ -915,16 +988,28 @@ namespace UTILS
         int
         show_select_dialog(HAL::Hal* hal, const std::string& title, const std::vector<std::string>& items, int default_index)
         {
-            if (items.empty())
+            constexpr size_t MAX_DIALOG_ITEMS = 32;
+            const char* ptrs[MAX_DIALOG_ITEMS];
+            size_t count = std::min(items.size(), MAX_DIALOG_ITEMS);
+            for (size_t i = 0; i < count; i++)
+                ptrs[i] = items[i].c_str();
+            return show_select_dialog(hal, title, ptrs, count, default_index);
+        }
+
+        int show_select_dialog(
+            HAL::Hal* hal, const std::string& title, const char* const* items, size_t item_count, int default_index)
+        {
+            if (item_count == 0)
             {
                 return -1;
             }
 
             // wake up screen
+            hal->displayWakeup();
             int brightness = hal->settings()->getNumber("system", "brightness");
             hal->display()->setBrightness(brightness == 0 ? 100 : brightness);
 
-            int selected_index = default_index >= 0 && default_index < items.size() ? default_index : 0;
+            int selected_index = default_index >= 0 && default_index < (int)item_count ? default_index : 0;
             bool selecting = true;
             int scroll_offset = 0;
             int line_height = hal->canvas()->fontHeight(FONT_16) + 2 + 1;
@@ -939,82 +1024,129 @@ namespace UTILS
             }
 
             is_repeat = false;
-            is_start = false;
             // create hint highlight context
             HLTextContext_t hint_ctx;
             hl_text_init(&hint_ctx, hal->canvas(), 20, 1500);
+            is_repeat = false;
+            next_fire_ts = 0xFFFFFFFF;
+
+            // Scroll context for long selected item (same as app_nodes)
+            const int text_area_width = hal->canvas()->width() - 10 - scrollbar_width - 5 - 2;
+            UTILS::SCROLL_TEXT::ScrollTextContext_t item_scroll_ctx;
+            UTILS::SCROLL_TEXT::scroll_text_init_ex(&item_scroll_ctx,
+                                                    hal->canvas(),
+                                                    text_area_width,
+                                                    line_height - 2,
+                                                    20,
+                                                    2000,
+                                                    FONT_16);
+            int prev_selected_index = -1; // to force initial render
+            bool need_update = true;
+            const int text_x = 10;
 
             while (selecting)
             {
-                hal->canvas()->fillScreen(THEME_COLOR_BG);
-
-                // Draw title
-                hal->canvas()->setTextColor(TFT_CYAN, THEME_COLOR_BG);
-                hal->canvas()->setFont(FONT_16);
-                hal->canvas()->drawString(title.c_str(), 5, 0);
-
-                // Draw list of items
-                int y_offset = y_start;
-                for (int i = scroll_offset; i < items.size() && i < scroll_offset + max_visible_items; i++)
+                bool selection_changed = (selected_index != prev_selected_index);
+                if (selection_changed)
                 {
-                    if (i == selected_index)
+                    UTILS::SCROLL_TEXT::scroll_text_reset(&item_scroll_ctx);
+                    prev_selected_index = selected_index;
+                    need_update = true;
+
+                    hal->canvas()->fillScreen(THEME_COLOR_BG);
+
+                    // Draw title
+                    hal->canvas()->setTextColor(TFT_CYAN);
+                    hal->canvas()->setFont(FONT_16);
+                    hal->canvas()->drawString(title.c_str(), 5, 0);
+
+                    // Draw list of items (only when selection changed)
+                    hal->canvas()->setFont(FONT_16);
+                    int y_offset = y_start;
+                    for (int i = scroll_offset; i < (int)item_count && i < scroll_offset + max_visible_items; i++)
                     {
-                        hal->canvas()->fillRect(5,
-                                                y_offset + 1,
-                                                hal->canvas()->width() - 5 - scrollbar_width - 2 - 1,
-                                                18,
-                                                THEME_COLOR_BG_SELECTED);
-                        hal->canvas()->setTextColor(TFT_BLACK, THEME_COLOR_BG_SELECTED);
-                    }
-                    else
-                    {
-                        hal->canvas()->setTextColor(TFT_WHITE, THEME_COLOR_BG);
+                        if (i == selected_index)
+                        {
+                            hal->canvas()->fillRect(5,
+                                                    y_offset + 1,
+                                                    hal->canvas()->width() - 5 - scrollbar_width - 2 - 1,
+                                                    line_height - 2,
+                                                    THEME_COLOR_BG_SELECTED);
+                            hal->canvas()->setTextColor(THEME_COLOR_SELECTED);
+                        }
+                        else
+                        {
+                            hal->canvas()->setTextColor(THEME_COLOR_UNSELECTED);
+                        }
+
+                        bool text_fits = hal->canvas()->textWidth(items[i]) <= text_area_width;
+                        if (i == selected_index && !text_fits)
+                        {
+                            UTILS::SCROLL_TEXT::scroll_text_render(&item_scroll_ctx,
+                                                                   items[i],
+                                                                   text_x,
+                                                                   y_offset + 1,
+                                                                   THEME_COLOR_SELECTED,
+                                                                   THEME_COLOR_BG_SELECTED);
+                        }
+                        else
+                        {
+                            std::string display_name(items[i]);
+                            if (!text_fits)
+                            {
+                                int char_w = hal->canvas()->textWidth("0");
+                                display_name = display_name.substr(0, char_w > 0 ? text_area_width / char_w : 20) + ">";
+                            }
+                            hal->canvas()->drawString(display_name.c_str(), text_x, y_offset + 1);
+                        }
+                        y_offset += line_height;
                     }
 
-                    // Truncate display name if too long
-                    std::string display_name = items[i];
-                    if (hal->canvas()->textWidth(display_name.c_str(), FONT_16) >
-                        hal->canvas()->width() - 5 - scrollbar_width - 2 - 5)
+                    // Draw scrollbar
+                    UTILS::UI::draw_scrollbar(hal->canvas(),
+                                              hal->canvas()->width() - scrollbar_width - 2,
+                                              y_start,
+                                              scrollbar_width,
+                                              scrollbar_height,
+                                              (int)item_count,
+                                              max_visible_items,
+                                              scroll_offset);
+                }
+                else
+                {
+                    // Selection unchanged: only update selected item's scroll (if long) and hint
+                    int sel_vis = selected_index - scroll_offset;
+                    if (sel_vis >= 0 && sel_vis < max_visible_items)
                     {
-                        display_name =
-                            display_name.substr(0, (hal->canvas()->width() - 24) / hal->canvas()->textWidth("0")) + ">";
+                        int sel_y = y_start + sel_vis * line_height + 1;
+                        bool text_fits = hal->canvas()->textWidth(items[selected_index]) <= text_area_width;
+                        if (!text_fits)
+                        {
+                            hal->canvas()->setFont(FONT_16);
+                            need_update |= UTILS::SCROLL_TEXT::scroll_text_render(&item_scroll_ctx,
+                                                                                  items[selected_index],
+                                                                                  text_x,
+                                                                                  sel_y,
+                                                                                  THEME_COLOR_SELECTED,
+                                                                                  THEME_COLOR_BG_SELECTED);
+                        }
                     }
-
-                    hal->canvas()->drawString(display_name.c_str(), 10, y_offset + 1);
-                    y_offset += 16 + 2 + 1;
                 }
 
-                // Draw scrollbar if needed
-                if (items.size() > max_visible_items)
+                need_update |= hl_text_render(&hint_ctx,
+                                              "[\u2191][\u2193][\u2190][\u2192] [DEL] [ESC] [ENTER]",
+                                              5,
+                                              hal->canvas()->height() - 9,
+                                              TFT_DARKGREY,
+                                              TFT_WHITE,
+                                              THEME_COLOR_BG);
+
+                if (need_update)
                 {
-                    int scrollbar_x = hal->canvas()->width() - scrollbar_width - 2;
-
-                    hal->canvas()->drawRect(scrollbar_x, y_start, scrollbar_width, scrollbar_height, TFT_DARKGREY);
-
-                    int thumb_height = scrollbar_height * max_visible_items / items.size();
-                    int thumb_pos =
-                        y_start + (scrollbar_height - thumb_height) * scroll_offset / (items.size() - max_visible_items);
-
-                    hal->canvas()->fillRect(scrollbar_x, thumb_pos, scrollbar_width, thumb_height, TFT_ORANGE);
+                    hal->canvas_update();
+                    need_update = false;
                 }
-
-                // Draw controls hint
-                // hal->canvas()->setFont(FONT_10);
-                // hal->canvas()->setTextColor(TFT_DARKGREY, THEME_COLOR_BG);
-                // hal->canvas()->drawCenterString("[UP] [DOWN] [LEFT] [RIGHT] [ENTER] [DEL]",
-                //                                 hal->canvas()->width() / 2,
-                //                                 hal->canvas()->height() - 12);
-                // hal->canvas()->setFont(FONT_16);
-                hl_text_render(&hint_ctx,
-                               "[UP] [DOWN] [LEFT] [RIGHT] [ENTER] [DEL]",
-                               0,
-                               hal->canvas()->height() - 12,
-                               TFT_DARKGREY,
-                               TFT_WHITE,
-                               THEME_COLOR_BG);
-
-                hal->canvas_update();
-                if (hal->home_button()->isPressed())
+                if (hal->home_button()->is_pressed())
                 {
                     selected_index = -1;
                     selecting = false;
@@ -1022,85 +1154,74 @@ namespace UTILS
                 // Handle input
                 hal->keyboard()->updateKeyList();
                 hal->keyboard()->updateKeysState();
+                // Screenshot support
+                UTILS::SCREENSHOT_TOOLS::check_and_handle_screenshot(hal, nullptr);
                 if (hal->keyboard()->isPressed())
                 {
                     if (hal->keyboard()->isKeyPressing(KEY_NUM_UP))
                     {
-                        if (!is_repeat || !hal->keyboard()->waitForRelease(KEY_NUM_UP, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
-                            if (selected_index > 0)
+                        if (selected_index > 0)
+                        {
+                            hal->playNextSound();
+                            selected_index--;
+                            if (selected_index < scroll_offset)
                             {
-                                selected_index--;
-                                if (selected_index < scroll_offset)
-                                {
-                                    scroll_offset = selected_index;
-                                }
+                                scroll_offset = selected_index;
                             }
+                            need_update = true;
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_DOWN))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_DOWN, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
-                            if (selected_index < items.size() - 1)
+                        if (selected_index < (int)item_count - 1)
+                        {
+                            hal->playNextSound();
+                            selected_index++;
+                            if (selected_index >= scroll_offset + max_visible_items)
                             {
-                                selected_index++;
-                                if (selected_index >= scroll_offset + max_visible_items)
-                                {
-                                    scroll_offset = selected_index - max_visible_items + 1;
-                                }
+                                scroll_offset = selected_index - max_visible_items + 1;
                             }
+                            need_update = true;
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_LEFT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
-                            // Jump up by visible_items count (page up)
+                        if (selected_index > 0)
+                        {
+                            hal->playNextSound();
                             int jump = max_visible_items;
-                            if (selected_index > 0)
-                            {
-                                selected_index = std::max(0, selected_index - jump);
-                                scroll_offset = std::max(0, selected_index - (max_visible_items - 1));
-                            }
+                            selected_index = std::max(0, selected_index - jump);
+                            scroll_offset = std::max(0, selected_index - (max_visible_items - 1));
+                            need_update = true;
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
                     {
-                        if (!is_repeat ||
-                            !hal->keyboard()->waitForRelease(KEY_NUM_RIGHT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-                        {
-                            is_start = !is_repeat;
-                            is_repeat = true;
-                            hal->playNextSound();
+                        if (!key_repeat_check(is_repeat, next_fire_ts, millis()))
+                            continue;
 
+                        if (selected_index < (int)item_count - 1)
+                        {
+                            hal->playNextSound();
                             int jump = max_visible_items;
-                            if (selected_index < items.size() - 1)
-                            {
-                                selected_index = std::min((int)items.size() - 1, selected_index + jump);
-                                scroll_offset = std::min(std::max(0, (int)items.size() - max_visible_items), selected_index);
-                            }
+                            selected_index = std::min((int)item_count - 1, selected_index + jump);
+                            scroll_offset = std::min(std::max(0, (int)item_count - max_visible_items), selected_index);
+                            need_update = true;
                         }
                     }
                     else if (hal->keyboard()->isKeyPressing(KEY_NUM_ENTER))
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_ENTER);
-                        hal->playLastSound();
 
                         if (selected_index >= 0)
                         {
@@ -1111,7 +1232,6 @@ namespace UTILS
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_BACKSPACE);
-                        hal->playLastSound();
 
                         selected_index = -1;
                         selecting = false;
@@ -1120,18 +1240,19 @@ namespace UTILS
                     {
                         hal->playNextSound();
                         hal->keyboard()->waitForRelease(KEY_NUM_ESC);
-                        hal->playLastSound();
 
                         selected_index = -1;
                         selecting = false;
                     }
                 }
                 else
+                {
                     is_repeat = false;
-
+                }
                 delay(5);
             }
 
+            UTILS::SCROLL_TEXT::scroll_text_free(&item_scroll_ctx);
             hl_text_free(&hint_ctx);
             return selected_index;
         }

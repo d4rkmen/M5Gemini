@@ -34,14 +34,14 @@ bool Button::read()
 }
 
 // has the button been toggled from on -> off, or vice versa
-bool Button::isToggled()
+bool Button::is_toggled()
 {
     read();
-    return hasChanged();
+    return has_changed();
 }
 
 // mostly internal, tells you if a button has changed after calling the read() function
-bool Button::hasChanged()
+bool Button::has_changed()
 {
     if (_has_changed)
     {
@@ -52,7 +52,7 @@ bool Button::hasChanged()
 }
 
 // has the button gone from off -> on
-bool Button::isPressed() { return (read() == PRESSED && hasChanged()); }
+bool Button::is_pressed() { return (read() == PRESSED && has_changed()); }
 
 // has the button gone from on -> off
-bool Button::isReleased() { return (read() == RELEASED && hasChanged()); }
+bool Button::is_released() { return (read() == RELEASED && has_changed()); }

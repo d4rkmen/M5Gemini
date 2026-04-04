@@ -10,6 +10,7 @@
  */
 #pragma once
 
+// #include "ascii_fonts.hpp"
 #include "unicode_fonts.hpp"
 
 #define THEME_COLOR_BG TFT_BLACK
@@ -17,7 +18,6 @@
 #define THEME_COLOR_TITLE_HISTORY (uint32_t)(0x5DA9D8)
 #define THEME_COLOR_HEADER_BG TFT_BLACK
 #define THEME_COLOR_HEADER_TEXT TFT_WHITE
-// (uint32_t)(0x333333)
 #define THEME_COLOR_SYSTEM_BAR (uint32_t)(0xD3D3D3) //(0x99FF00)
 #define THEME_COLOR_SYSTEM_BAR_TEXT TFT_BLACK
 #define THEME_COLOR_KB_BAR TFT_LIGHTGREY
@@ -27,7 +27,11 @@
 #define THEME_COLOR_ICON_16 (uint16_t)(0x3CE7)
 #define THEME_COLOR_BG_SELECTED (uint32_t)(0xD3D3D3)
 #define THEME_COLOR_SELECTED (uint32_t)(0x000000)
-#define THEME_COLOR_TRANSPARENT (uint32_t)(0x4CFF00)
+#define THEME_COLOR_UNSELECTED (uint32_t)(0xFFFFFF)
+#define THEME_COLOR_KEYBOARD_LOWER (uint32_t)(0xA0A0A0)
+#define THEME_COLOR_KEYBOARD_UPPER (uint32_t)(0x0074FF)
+#define THEME_COLOR_KEYBOARD_FN (uint32_t)(0xFF6A00)
+#define THEME_COLOR_KEYBOARD_TEXT (uint32_t)(0x00FFFF)
 #define ICON_WIDTH 48
 #define ICON_GAP 20
 #define ICON_MARGIN_TOP 20
@@ -43,6 +47,8 @@
 #define THEME_COLOR_KB_OPT TFT_DARKGREEN
 
 #define THEME_COLOR_REPL_TEXT TFT_WHITE
+#define FONT_8 &Font0
+#define FONT_6 &tomthumb_6
 #define FONT_10 &efont_unicode_10
 #define FONT_12 &efont_unicode_12
 #define FONT_16 &efont_unicode_16
