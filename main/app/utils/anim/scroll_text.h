@@ -9,8 +9,8 @@
  */
 #pragma once
 
-// #include "../../../components/M5GFX/src/lgfx/v1/LGFX_Sprite.hpp"
 #include "lgfx/v1/LGFX_Sprite.hpp"
+#include "lgfx/v1/lgfx_fonts.hpp"
 
 #define SCROLL_TEXT_PAUSE 1000 // Default pause duration at scroll ends in ms
 
@@ -52,6 +52,25 @@ namespace UTILS
                               int height,
                               uint32_t speed_ms = 50,
                               uint32_t pause_ms = SCROLL_TEXT_PAUSE);
+        /**
+         * @brief Initialize scroll text context
+         *
+         * @param ctx Pointer to context to initialize
+         * @param canvas Base canvas to create sprite on
+         * @param width Width of the scrolling area
+         * @param height Height of the scrolling area
+         * @param speed_ms Update period in ms (lower = faster)
+         * @param pause_ms Pause duration at ends in ms
+         * @param font Font to use
+         * @return true if initialization was successful
+         */
+        bool scroll_text_init_ex(ScrollTextContext_t* ctx,
+                                 lgfx::LovyanGFX* canvas,
+                                 int width,
+                                 int height,
+                                 uint32_t speed_ms,
+                                 uint32_t pause_ms,
+                                 const lgfx::IFont* font);
 
         /**
          * @brief Render scrolling text
