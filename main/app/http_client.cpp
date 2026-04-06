@@ -246,18 +246,17 @@ esp_err_t _http_event_handler_11labs(esp_http_client_event_t* evt)
         }
         break;
     case HTTP_EVENT_ON_FINISH:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+        ESP_LOGI(TAG, "TTS HTTP finished, content_type=%s, received=%d bytes", context->content_type.c_str(), context->total_bytes_received);
         // Signal that no more data is coming
         if (context->control_event_group)
         {
             if ((xEventGroupGetBits(context->control_event_group) & TTS_PLAYBACK_START_REQUEST_BIT) == 0)
             {
                 // Signal playback task to start
-                ESP_LOGD(TAG, "Setting playback start request");
+                ESP_LOGI(TAG, "Setting playback start request (late, from ON_FINISH)");
                 xEventGroupSetBits(context->control_event_group, TTS_PLAYBACK_START_REQUEST_BIT);
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
-            ESP_LOGD(TAG, "Signaled end of stream (received %d bytes total)", context->total_bytes_received);
             xEventGroupSetBits(context->control_event_group, TTS_PLAYBACK_STOP_REQUEST_BIT);
         }
         break;
@@ -295,7 +294,7 @@ void tts_play_task(void* pvParameters)
     bool stopping = false;
 
     // Task startup
-    ESP_LOGD(TAG, "Audio playback task started");
+    ESP_LOGI(TAG, "TTS play task started");
     xEventGroupSetBits(context->control_event_group, TTS_PLAY_TASK_STARTED_BIT);
     context->total_bytes_played = 0;
 
@@ -310,12 +309,12 @@ void tts_play_task(void* pvParameters)
     // If we got the stop signal without start, we're done
     if (bits & TTS_STOP_REQUEST_BIT)
     {
-        ESP_LOGD(TAG, "Received STOP, exiting playback task");
+        ESP_LOGW(TAG, "TTS play: got STOP before START, exiting");
         running = false;
     }
     if (bits & TTS_PLAYBACK_START_REQUEST_BIT)
     {
-        ESP_LOGD(TAG, "Received START, starting audio playback");
+        ESP_LOGI(TAG, "TTS play: starting audio playback");
         running = true;
     }
 
@@ -397,10 +396,11 @@ void tts_play_task(void* pvParameters)
     // Signal that we're done
     xEventGroupSetBits(context->control_event_group, TTS_PLAY_TASK_STOPPED_BIT);
 
-    ESP_LOGD(TAG,
-             "Audio playback task complete, played %d/%d bytes",
+    ESP_LOGI(TAG,
+             "TTS play task done: played %d/%d bytes, speaker_running=%d",
              context->total_bytes_played,
-             context->total_bytes_received);
+             context->total_bytes_received,
+             context->hal->speaker()->isRunning());
 
     vTaskDelete(NULL);
 }
@@ -562,8 +562,7 @@ std::string call_google_api(const std::string& model_name,
     // Add contents array to root
     cJSON_AddItemToObject(root, "contents", contents);
 
-    // Convert to string
-    post_data = cJSON_Print(root);
+    post_data = cJSON_PrintUnformatted(root);
     if (!post_data)
     {
         ESP_LOGE(TAG, "Failed to print JSON to string");
