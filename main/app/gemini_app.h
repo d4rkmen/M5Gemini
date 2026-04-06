@@ -52,6 +52,7 @@ enum HistoryItemType
 #define TTS_TASK_STACK_SIZE 4096
 #define TTS_TASK_PRIORITY 5
 #define TTS_TASK_CORE 1
+#define MAX_HISTORY_TURNS 5
 
 class GeminiApp
 {

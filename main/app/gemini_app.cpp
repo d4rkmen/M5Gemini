@@ -1,6 +1,7 @@
 #include "gemini_app.h"
 #include "audio_buffer.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "app/utils/ui/dialog.h"
 #include "app/utils/ui/settings_screen.h"
 #include "app/utils/theme/theme_define.h"
@@ -225,6 +226,15 @@ void GeminiApp::startTTS()
                          TTS_STOP_REQUEST_BIT | TTS_PLAY_TASK_STARTED_BIT | TTS_PLAY_TASK_STOPPED_BIT |
                              TTS_STREAM_TASK_STARTED_BIT | TTS_STREAM_TASK_STOPPED_BIT | TTS_PLAYBACK_START_REQUEST_BIT |
                              TTS_PLAYBACK_STOP_REQUEST_BIT);
+    // Ensure speaker is initialized (may have been shut down for mic recording)
+    if (!_hal->speaker()->isRunning())
+    {
+        if (!_hal->speaker()->begin())
+        {
+            ESP_LOGE(TAG, "Failed to start speaker for TTS");
+            return;
+        }
+    }
     // set system volume
     _hal->speaker()->setVolume(255);
     _hal->speaker()->setChannelVolume(AUDIO_CHANNEL, _hal->settings()->getNumber(ELEVENLABS_NS, "volume"));
@@ -265,14 +275,14 @@ void GeminiApp::tts_stream_task(void* parameter)
     std::string model_id = hal->settings()->getString(ELEVENLABS_NS, "model");
     xEventGroupSetBits(control_event_group, TTS_STREAM_TASK_STARTED_BIT);
 
-    ESP_LOGD(TAG, "HTTP TTS task started (Handle: %p)", task_handle);
+    ESP_LOGI(TAG, "TTS stream task started, text=%d chars", (int)text_to_process.length());
     // Pass the control event group to the API call
     std::string result = call_11labs_api(hal, api_key, voice_id, text_to_process, model_id, control_event_group);
+    ESP_LOGI(TAG, "TTS stream task: API returned: %s", result.c_str());
 
     // Clear the running bit and any pending stop request in the control event group
     if (control_event_group != nullptr)
     {
-        ESP_LOGD(TAG, "Clearing HTTP TTS control bits (Handle: %p)", task_handle);
         xEventGroupSetBits(control_event_group, TTS_STREAM_TASK_STOPPED_BIT);
     }
 
@@ -472,9 +482,7 @@ void GeminiApp::update()
                     _chat.push_back({HISTORY_ITEM_TYPE_USER, line});
                 _partialPrompt = "";
                 updateScrollPosition();
-                // debug only
-                xEventGroupSetBits(_control_event_group, STT_STOP_REQUEST_BIT);
-                vTaskDelay(pdMS_TO_TICKS(100));
+                deepgram_streaming_stop();
                 callGeminiAPI();
                 is_rendered = false;
             }
@@ -494,34 +502,39 @@ void GeminiApp::update()
         case APP_STATE_CONNECTING_GEMINI:
             if (bits & GEMINI_TASK_STOPPED_BIT)
             {
-                setState(APP_STATE_IDLE);
                 xEventGroupClearBits(_control_event_group, GEMINI_TASK_STOPPED_BIT);
-                // check error
                 if (_apiResponse.find("Error:") == 0)
                 {
-                    // Show error dialog
                     UTILS::UI::show_error_dialog(_hal, "API error", _apiResponse, "OK");
-                    // check history and jump to main if no history
                     if (_history.empty())
                         _currentScreen = SCREEN_START;
                     else
                         _currentScreen = SCREEN_CHAT;
+                    setState(APP_STATE_IDLE);
                     is_rendered = false;
                 }
                 else
                 {
-                    setState(APP_STATE_CONNECTING_TTS);
-                    // Start TTS task
-                    startTTS();
-                    // Add successful chat to history
                     for (const auto& line : splitTextIntoLines(_apiResponse))
                         _chat.push_back({HISTORY_ITEM_TYPE_MODEL, line});
                     _history.push_back({_userPrompt, _apiResponse});
+                    while (_history.size() > MAX_HISTORY_TURNS)
+                        _history.erase(_history.begin());
                     _partialPrompt = "";
-                    // Calculate scroll position to show the start of the latest request
                     updateScrollPosition();
                     _currentScreen = SCREEN_CHAT;
                     is_rendered = false;
+
+                    if (_hal->settings()->getBool(ELEVENLABS_NS, "enabled") &&
+                        !_hal->settings()->getString(ELEVENLABS_NS, "api_key").empty())
+                    {
+                        setState(APP_STATE_CONNECTING_TTS);
+                        startTTS();
+                    }
+                    else
+                    {
+                        setState(APP_STATE_IDLE);
+                    }
                 }
             }
             break;
@@ -533,14 +546,11 @@ void GeminiApp::update()
             }
             break;
         case APP_STATE_TTS_PLAYING:
-            if ((bits & (TTS_PLAY_TASK_STOPPED_BIT | STT_STREAM_TASK_STOPPED_BIT)) ==
-                (TTS_PLAY_TASK_STOPPED_BIT | STT_STREAM_TASK_STOPPED_BIT))
+            if ((bits & (TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT)) ==
+                (TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT))
             {
-                setState(APP_STATE_IDLE);
                 _partialPrompt = "";
-                deepgram_streaming_stop();
-                vTaskDelay(pdMS_TO_TICKS(100));
-                // can start listening again
+                setState(APP_STATE_IDLE);
                 is_rendered = false;
             }
             break;
@@ -699,16 +709,15 @@ void GeminiApp::handleMainScreenInput()
 void GeminiApp::handleSettingsMenu()
 {
     // Update the settings screen
-    bool need_update = UTILS::UI::SETTINGS_SCREEN::update(
-        _hal,
-        _groups,
-        _hintTextContext,
-        _descScrollContext,
-        [this]()
-        {
-            _currentScreen = SCREEN_START;
-            is_rendered = false;
-        });
+    bool need_update = UTILS::UI::SETTINGS_SCREEN::update(_hal,
+                                                          _groups,
+                                                          _hintTextContext,
+                                                          _descScrollContext,
+                                                          [this]()
+                                                          {
+                                                              _currentScreen = SCREEN_START;
+                                                              is_rendered = false;
+                                                          });
 
     // Update the display if needed
     if (need_update)
@@ -809,7 +818,7 @@ void GeminiApp::setState(AppState state)
 {
     if (_appState == state)
         return;
-    ESP_LOGI(TAG, "Setting app state to %d", state);
+    ESP_LOGI(TAG, "Setting app state to %d, heap=%lu", state, (unsigned long)esp_get_free_heap_size());
     _appState = state;
     _anim_context.timer_start = millis();
 }
