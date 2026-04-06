@@ -45,6 +45,7 @@
 #if HAL_USE_WIFI
 #include "wifi/wifi.h"
 #endif
+#include "es8311/es8311.h"
 
 namespace HAL
 {
@@ -90,6 +91,7 @@ namespace HAL
 #if HAL_USE_WIFI
         WiFi* _wifi;
 #endif
+        ES8311* _es8311 = nullptr;
 
     public:
         Hal(SETTINGS::Settings* settings)
@@ -190,6 +192,7 @@ namespace HAL
 #if HAL_USE_WIFI
         inline WiFi* wifi() { return _wifi; }
 #endif
+        inline ES8311* es8311() { return _es8311; }
 
         // Override
         virtual std::string type() { return "null"; }

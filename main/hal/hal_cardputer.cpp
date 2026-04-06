@@ -142,7 +142,19 @@ void HalCardputer::_init_speaker()
 void HalCardputer::_init_mic()
 {
     ESP_LOGI(TAG, "init mic");
-    _mic = new Mic();
+    _mic = new Mic(this);
+
+    if (_board_type == BoardType::CARDPUTER_ADV)
+    {
+        auto cfg = _mic->config();
+        cfg.pin_bck = 41;
+        cfg.pin_ws = 43;
+        cfg.pin_data_in = 46;
+        cfg.over_sampling = 1;   // do not change!
+        cfg.magnification = 220; // do not change!
+        _mic->config(cfg);
+        ESP_LOGI(TAG, "CardPuter ADV: mic uses ES8311 I2S codec (bck=41, ws=43, din=46)");
+    }
 }
 #endif
 
@@ -200,6 +212,11 @@ void HalCardputer::init()
 #if HAL_USE_KEYBOARD
     _init_keyboard();
 #endif
+    if (_board_type == BoardType::CARDPUTER_ADV)
+    {
+        _es8311 = new ES8311(this);
+        _es8311->init();
+    }
 #if HAL_USE_SPEAKER
     _init_speaker();
 #endif
