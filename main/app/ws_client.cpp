@@ -345,12 +345,23 @@ static void stt_mic_task(void* pvParameters)
             ESP_LOGI(TAG, "MIC frame #%lu: min=%d max=%d rms=%lu", frame_count, mn, mx, rms);
         }
 
-        if (xRingbufferSend(context->audio_ring_buffer,
-                            frame,
-                            MIC_BUFFER_SAMPLES * sizeof(int16_t),
-                            pdMS_TO_TICKS(BUFFER_SIZE_SECONDS * 1000)) != pdTRUE)
         {
-            ESP_LOGW(TAG, "Failed to send frame_buffer to ring buffer");
+            bool sent = false;
+            for (int tries = 0; tries < BUFFER_SIZE_SECONDS * 10; tries++)
+            {
+                if (xEventGroupGetBits(context->control_event_group) & STT_STOP_REQUEST_BIT)
+                    break;
+                if (xRingbufferSend(context->audio_ring_buffer,
+                                    frame,
+                                    MIC_BUFFER_SAMPLES * sizeof(int16_t),
+                                    pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    sent = true;
+                    break;
+                }
+            }
+            if (!sent)
+                ESP_LOGW(TAG, "Ring buffer send failed or aborted");
         }
     }
 
@@ -419,7 +430,7 @@ static void stt_stream_task(void* pvParameters)
 #endif
                     if (data_sent == item_size)
                     {
-                        ESP_LOGI(TAG,
+                        ESP_LOGD(TAG,
                                  "WS >> %d bytes (total: %lu)",
                                  item_size,
                                  (unsigned long)context->total_bytes_sent + item_size);
@@ -588,7 +599,17 @@ void deepgram_streaming_stop(void)
 {
     ESP_LOGI(TAG, "Stopping Deepgram streaming...");
     xEventGroupSetBits(deepgram_context.control_event_group, STT_STOP_REQUEST_BIT);
-    vTaskDelay(pdMS_TO_TICKS(100));
+
+    EventBits_t stopped = xEventGroupWaitBits(deepgram_context.control_event_group,
+                                              STT_MIC_TASK_STOPPED_BIT | STT_STREAM_TASK_STOPPED_BIT,
+                                              pdFALSE,
+                                              pdTRUE,
+                                              pdMS_TO_TICKS(3000));
+    if ((stopped & (STT_MIC_TASK_STOPPED_BIT | STT_STREAM_TASK_STOPPED_BIT)) !=
+        (STT_MIC_TASK_STOPPED_BIT | STT_STREAM_TASK_STOPPED_BIT))
+    {
+        ESP_LOGW(TAG, "Timed out waiting for tasks to stop (bits=0x%lx)", (unsigned long)stopped);
+    }
 
     if (deepgram_context.ws_client)
     {
