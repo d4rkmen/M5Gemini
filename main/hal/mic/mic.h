@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "driver/i2s_std.h"
+#include "hal/board.h"
 
 #define MIC_PIN_DATA_IN 46
 #define MIC_PIN_WS 43
@@ -20,6 +21,8 @@
 
 namespace HAL
 {
+    class Hal;
+
     struct mic_config_t
     {
         int pin_data_in = MIC_PIN_DATA_IN;
@@ -47,7 +50,7 @@ namespace HAL
     class Mic
     {
     public:
-        Mic();
+        Mic(Hal* hal);
         ~Mic();
 
         mic_config_t config(void) const { return _cfg; }
@@ -106,6 +109,8 @@ namespace HAL
         bool _setup_i2s(void);
         bool _rec_raw(void* recdata, size_t array_len, bool flg_16bit, uint32_t sample_rate, bool stereo);
 
+        Hal* _hal;
+        BoardType _board_type;
         mic_config_t _cfg;
         uint32_t _rec_sample_rate = 0;
 
