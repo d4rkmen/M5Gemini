@@ -18,6 +18,7 @@
 #include "audio_buffer.h"
 #include "event_bits.h"
 #include <sstream>
+#include <cmath>
 #include <format>
 
 #define MIC_BUFFER_SAMPLES 256   // 256 samples = 20ms
@@ -224,58 +225,144 @@ static void stt_mic_task(void* pvParameters)
     EventBits_t bits;
     bool running = true;
     bool is_recording = false;
-    int16_t frame_buffer[MIC_BUFFER_SAMPLES];
+    bool mic_warmed_up = false;
+    int warmup_skip = 0;
+
+    // Circular buffer: each record() call gets a different buffer position,
+    // matching the M5Unified pattern. With the mic's 2-slot queue, the block
+    // from 2 calls ago is guaranteed complete when the current record() returns.
+    static constexpr int REC_BLOCKS = 3;
+    int16_t rec_buf[REC_BLOCKS][MIC_BUFFER_SAMPLES];
+    int rec_wr = 0;
+    int rec_queued = 0;
+
     ESP_LOGI(TAG, "Mic task started");
     xEventGroupSetBits(context->control_event_group, STT_MIC_TASK_STARTED_BIT);
+    ESP_LOGI(TAG, "Mic task: calling speaker->end()");
     context->hal->speaker()->end();
-    context->hal->mic()->begin();
+    ESP_LOGI(TAG, "Mic task: speaker->end() done, waiting 20ms");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_LOGI(TAG, "Mic task: calling mic->begin()");
+    bool mic_ok = context->hal->mic()->begin();
+    ESP_LOGI(TAG, "Mic task: mic->begin() returned %d", mic_ok);
+
     while (running)
     {
-        // Check if stop has been requested
         bits = xEventGroupGetBits(context->control_event_group);
         if (bits & STT_STOP_REQUEST_BIT)
         {
             ESP_LOGD(TAG, "Mic task received STOP signal, closing task");
-            // clearing the ring buffer, discarding all data
             running = false;
             continue;
         }
         if (!is_recording && (bits & STT_RECORD_START_REQUEST_BIT))
         {
-            ESP_LOGD(TAG, "Mic task received START RECORDING signal");
-            // clear the bit
+            ESP_LOGI(TAG, "Mic task received START RECORDING signal");
             xEventGroupClearBits(context->control_event_group, STT_RECORD_START_REQUEST_BIT);
+            context->hal->speaker()->end();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            context->hal->mic()->begin();
             is_recording = true;
+            mic_warmed_up = true;
+            rec_wr = 0;
+            rec_queued = 0;
         }
         if (is_recording && (bits & STT_RECORD_STOP_REQUEST_BIT))
         {
-            ESP_LOGD(TAG, "Mic task received STOP RECORDING signal");
+            ESP_LOGI(TAG, "Mic task received STOP RECORDING signal");
             while (context->hal->mic()->isRecording())
             {
                 vTaskDelay(pdMS_TO_TICKS(1));
             }
             context->hal->mic()->end();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            context->hal->speaker()->begin();
             is_recording = false;
-            // clear the bit
             xEventGroupClearBits(context->control_event_group, STT_RECORD_STOP_REQUEST_BIT);
         }
 
-        if (is_recording && context->hal->mic()->record(frame_buffer, MIC_BUFFER_SAMPLES, AUDIO_SAMPLE_RATE, false))
+        if (!is_recording)
         {
-            if (xRingbufferSend(context->audio_ring_buffer,
-                                frame_buffer,
-                                MIC_BUFFER_SAMPLES * sizeof(int16_t),
-                                pdMS_TO_TICKS(BUFFER_SIZE_SECONDS * 1000)) != pdTRUE)
+            xEventGroupWaitBits(context->control_event_group,
+                                STT_RECORD_START_REQUEST_BIT | STT_STOP_REQUEST_BIT,
+                                pdFALSE,
+                                pdFALSE,
+                                pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        // Queue recording into the next circular buffer slot
+        if (!context->hal->mic()->record(rec_buf[rec_wr], MIC_BUFFER_SAMPLES, AUDIO_SAMPLE_RATE, false))
+            continue;
+
+        rec_queued++;
+        rec_wr = (rec_wr + 1) % REC_BLOCKS;
+
+        // Need at least 3 queued before the oldest is guaranteed complete
+        if (rec_queued < 3)
+            continue;
+
+        // rec_wr now points where the NEXT call will write, which is also
+        // the slot freed 3 calls ago (guaranteed complete by _rec_raw's wait).
+        int safe_idx = rec_wr;
+        int16_t* frame = rec_buf[safe_idx];
+
+        // Skip codec startup silence and DC offset transient
+        if (!mic_warmed_up)
+        {
+            bool all_zero = true;
+            for (int i = 0; i < MIC_BUFFER_SAMPLES; i++)
             {
-                ESP_LOGW(TAG, "Failed to send frame_buffer to ring buffer");
+                if (frame[i] != 0)
+                {
+                    all_zero = false;
+                    break;
+                }
             }
+            if (all_zero)
+                continue;
+            if (warmup_skip++ < 2)
+                continue;
+            mic_warmed_up = true;
+            ESP_LOGI(TAG, "Mic codec warmed up, DC offset settled");
+        }
+
+        static uint32_t frame_count = 0;
+        int16_t mn = frame[0], mx = frame[0];
+        int64_t sum_sq = 0;
+        for (int i = 0; i < MIC_BUFFER_SAMPLES; i++)
+        {
+            int16_t s = frame[i];
+            if (s < mn)
+                mn = s;
+            if (s > mx)
+                mx = s;
+            sum_sq += (int32_t)s * s;
+        }
+        uint32_t rms = (uint32_t)sqrtf((float)sum_sq / MIC_BUFFER_SAMPLES);
+        if ((frame_count++ % 50) == 0)
+        {
+            ESP_LOGI(TAG, "MIC frame #%lu: min=%d max=%d rms=%lu", frame_count, mn, mx, rms);
+        }
+
+        if (xRingbufferSend(context->audio_ring_buffer,
+                            frame,
+                            MIC_BUFFER_SAMPLES * sizeof(int16_t),
+                            pdMS_TO_TICKS(BUFFER_SIZE_SECONDS * 1000)) != pdTRUE)
+        {
+            ESP_LOGW(TAG, "Failed to send frame_buffer to ring buffer");
         }
     }
-    ESP_LOGI(TAG, "Mic task stopped");
+
+    ESP_LOGI(TAG, "Mic task stopping: calling mic->end()");
     context->hal->mic()->end();
-    context->hal->speaker()->begin();
+    ESP_LOGI(TAG, "Mic task: mic->end() done, waiting 20ms");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_LOGI(TAG, "Mic task: calling speaker->begin()");
+    bool spk_ok = context->hal->speaker()->begin();
+    ESP_LOGI(TAG, "Mic task stopped, speaker->begin()=%d", spk_ok);
     xEventGroupSetBits(context->control_event_group, STT_MIC_TASK_STOPPED_BIT);
-    vTaskDelete(NULL); // Delete self
+    vTaskDelete(NULL);
 }
 
 // Task dedicated to reading from the ring buffer and sending via WebSocket
@@ -332,7 +419,10 @@ static void stt_stream_task(void* pvParameters)
 #endif
                     if (data_sent == item_size)
                     {
-                        ESP_LOGD(TAG, ">> %d OK", item_size);
+                        ESP_LOGI(TAG,
+                                 "WS >> %d bytes (total: %lu)",
+                                 item_size,
+                                 (unsigned long)context->total_bytes_sent + item_size);
                         context->total_bytes_sent += item_size;
                     }
                     else
@@ -442,6 +532,11 @@ bool deepgram_streaming_start(HAL::Hal* hal, EventGroupHandle_t control_event_gr
         goto cleanup;
     }
 
+    ESP_LOGI(TAG,
+             "Heap before WS start: free=%lu, min_ever=%lu",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)esp_get_minimum_free_heap_size());
+
     // Start WebSocket client
     start_ret = esp_websocket_client_start(deepgram_context.ws_client);
     if (start_ret != ESP_OK)
@@ -452,7 +547,10 @@ bool deepgram_streaming_start(HAL::Hal* hal, EventGroupHandle_t control_event_gr
 
     // Wait briefly for tasks to potentially start
     vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_LOGI(TAG, "WebSocket client started");
+    ESP_LOGI(TAG,
+             "WebSocket client started, heap: free=%lu, min_ever=%lu",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)esp_get_minimum_free_heap_size());
     return true;
 
 cleanup:
@@ -516,5 +614,7 @@ void deepgram_streaming_stop(void)
     deepgram_context.mic_task_handle = NULL;
     deepgram_context.stream_task_handle = NULL;
 
-    ESP_LOGI(TAG, "Deepgram streaming stopped and resources cleaned up");
+    ESP_LOGI(TAG,
+             "Deepgram streaming stopped and resources cleaned up, heap: free=%lu",
+             (unsigned long)esp_get_free_heap_size());
 }
