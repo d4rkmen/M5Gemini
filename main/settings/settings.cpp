@@ -77,10 +77,10 @@ namespace SETTINGS
             {"model",
              "Model name",
              TYPE_STRING,
-             "gemini-1.5-flash",
+             "gemini-flash-latest",
              "",
-             "gemini-2.5-pro-preview-03-25;gemini-2.0-flash-thinking-exp-01-21;gemini-2.0-flash;gemini-2.0-flash-lite;"
-             "gemini-1.5-pro;gemini-1.5-flash",
+             "gemini-3.1-pro-preview;gemini-3-flash-preview;gemini-3.1-flash-lite-preview;gemini-2.5-pro;gemini-2.5-flash;"
+             "gemini-2.5-flash-lite;gemini-pro-latest;gemini-flash-latest",
              "",
              "Model name to use for Gemini. Hold [Fn] to enter custom"},
             {"rules",
@@ -107,9 +107,9 @@ namespace SETTINGS
             {"voice",
              "Voice ID",
              TYPE_STRING,
-             "0sGQQaD2G2X1s87kHM5b",
+             "bIHbv24MWmeRgasZH58o",
              "",
-             "0sGQQaD2G2X1s87kHM5b;X5gGKB97vhrZhE6AgMYI;qg9068uIPhh2zLXgBEgX",
+             "bIHbv24MWmeRgasZH58o;bVMeCyTHy58xNoL34h3p",
              "",
              "Voice ID to use. Hold [Fn] to enter custom"},
             {"model",
@@ -117,8 +117,7 @@ namespace SETTINGS
              TYPE_STRING,
              "eleven_multilingual_v2",
              "",
-             "eleven_multilingual_v2;eleven_flash_v2_5;eleven_flash_v2;eleven_turbo_v2_5;eleven_turbo_v2;eleven_monolingual_"
-             "v1;eleven_multilingual_v1",
+             "eleven_v3;eleven_multilingual_v2;eleven_flash_v2_5;eleven_flash_v2;scribe_v2",
              "",
              "The TTS model to use. Hold [Fn] to enter custom"},
         };
@@ -508,8 +507,7 @@ namespace SETTINGS
         for (const auto& group : _metadata)
         {
             nvs_handle_t nvs_handle;
-            esp_err_t err =
-                nvs_open_from_partition(_active_partition, group.nvs_namespace.c_str(), NVS_READWRITE, &nvs_handle);
+            esp_err_t err = nvs_open_from_partition(_active_partition, group.nvs_namespace.c_str(), NVS_READWRITE, &nvs_handle);
             if (err != ESP_OK)
             {
                 success = false;
