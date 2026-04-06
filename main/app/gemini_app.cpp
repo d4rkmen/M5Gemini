@@ -43,7 +43,7 @@ static bool is_start = false;
 #define KEY_REPEAT_MS 50
 static bool is_rendered = false;
 
-#define FONT_14 &font_geist14
+// #define FONT_14 &font_geist14
 
 // Animation constants
 #define ANIMATION_STACK_SIZE 4096
@@ -923,7 +923,7 @@ bool GeminiApp::drawResponseScreen()
 
     if (_chat.empty() && _partialPrompt.empty())
     {
-        _hal->canvas()->setTextColor(TFT_DARKGRAY, THEME_COLOR_BG);
+        _hal->canvas()->setTextColor(TFT_DARKGRAY);
         _hal->canvas()->drawCenterString("no chat history", _hal->canvas()->width() / 2, _hal->canvas()->height() / 2, FONT_16);
     }
     else
