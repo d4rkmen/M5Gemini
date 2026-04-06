@@ -332,7 +332,6 @@ namespace HAL
          * @brief Mix audio channels
          */
         size_t _mix_channels(size_t samples);
-
     };
 
 } // namespace HAL

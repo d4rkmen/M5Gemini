@@ -683,11 +683,7 @@ namespace HAL
         for (size_t i = 0; i <= self->_cfg.dma_buf_count; ++i)
         {
             size_t bytes_written;
-            i2s_channel_write(self->_tx_chan,
-                              self->mix_buf,
-                              buffer_size * sizeof(int16_t),
-                              &bytes_written,
-                              pdMS_TO_TICKS(100));
+            i2s_channel_write(self->_tx_chan, self->mix_buf, buffer_size * sizeof(int16_t), &bytes_written, pdMS_TO_TICKS(100));
         }
 
         if (self->_board_type == BoardType::CARDPUTER_ADV && self->_hal->es8311())

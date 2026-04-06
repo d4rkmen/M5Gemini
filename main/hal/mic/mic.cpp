@@ -55,14 +55,23 @@ static void calcClockDiv(uint32_t* div_a, uint32_t* div_b, uint32_t* div_n, uint
             for (uint32_t a = 1; a < 64; ++a)
             {
                 uint32_t b = roundf(a * fdiv);
-                if (a <= b) { continue; }
+                if (a <= b)
+                {
+                    continue;
+                }
                 uint32_t diff = abs((int)(check_target - ((check_base * a) / (n * a + b))));
-                if (save_diff <= diff) { continue; }
+                if (save_diff <= diff)
+                {
+                    continue;
+                }
                 save_diff = diff;
                 save_a = a;
                 save_b = b;
                 save_n = n;
-                if (!diff) { break; }
+                if (!diff)
+                {
+                    break;
+                }
             }
         }
     }
@@ -73,19 +82,11 @@ static void calcClockDiv(uint32_t* div_a, uint32_t* div_b, uint32_t* div_n, uint
 
 namespace HAL
 {
-    Mic::Mic(Hal* hal) : _hal(hal), _board_type(hal->board_type())
-    {
-    }
+    Mic::Mic(Hal* hal) : _hal(hal), _board_type(hal->board_type()) {}
 
-    Mic::~Mic()
-    {
-        end();
-    }
+    Mic::~Mic() { end(); }
 
-    uint32_t Mic::_calc_rec_rate(void) const
-    {
-        return _cfg.sample_rate * _cfg.over_sampling;
-    }
+    uint32_t Mic::_calc_rec_rate(void) const { return _cfg.sample_rate * _cfg.over_sampling; }
 
     bool Mic::_setup_i2s(void)
     {
@@ -125,10 +126,9 @@ namespace HAL
             pdm_config.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
             pdm_config.slot_cfg.slot_mode =
                 _cfg.stereo ? i2s_slot_mode_t::I2S_SLOT_MODE_STEREO : i2s_slot_mode_t::I2S_SLOT_MODE_MONO;
-            pdm_config.slot_cfg.slot_mask =
-                _cfg.stereo ? i2s_pdm_slot_mask_t::I2S_PDM_SLOT_BOTH
-                            : (_cfg.left_channel ? i2s_pdm_slot_mask_t::I2S_PDM_SLOT_LEFT
-                                                 : i2s_pdm_slot_mask_t::I2S_PDM_SLOT_RIGHT);
+            pdm_config.slot_cfg.slot_mask = _cfg.stereo ? i2s_pdm_slot_mask_t::I2S_PDM_SLOT_BOTH
+                                                        : (_cfg.left_channel ? i2s_pdm_slot_mask_t::I2S_PDM_SLOT_LEFT
+                                                                             : i2s_pdm_slot_mask_t::I2S_PDM_SLOT_RIGHT);
             pdm_config.gpio_cfg.clk = (gpio_num_t)_cfg.pin_ws;
             pdm_config.gpio_cfg.din = (gpio_num_t)_cfg.pin_data_in;
 
@@ -154,10 +154,9 @@ namespace HAL
             i2s_config.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
             i2s_config.slot_cfg.slot_mode =
                 _cfg.stereo ? i2s_slot_mode_t::I2S_SLOT_MODE_STEREO : i2s_slot_mode_t::I2S_SLOT_MODE_MONO;
-            i2s_config.slot_cfg.slot_mask =
-                _cfg.stereo ? i2s_std_slot_mask_t::I2S_STD_SLOT_BOTH
-                            : (_cfg.left_channel ? i2s_std_slot_mask_t::I2S_STD_SLOT_LEFT
-                                                 : i2s_std_slot_mask_t::I2S_STD_SLOT_RIGHT);
+            i2s_config.slot_cfg.slot_mask = _cfg.stereo ? i2s_std_slot_mask_t::I2S_STD_SLOT_BOTH
+                                                        : (_cfg.left_channel ? i2s_std_slot_mask_t::I2S_STD_SLOT_LEFT
+                                                                             : i2s_std_slot_mask_t::I2S_STD_SLOT_RIGHT);
             i2s_config.slot_cfg.ws_width = 16;
             i2s_config.slot_cfg.bit_shift = true;
             i2s_config.slot_cfg.left_align = true;
@@ -220,7 +219,12 @@ namespace HAL
 #if portNUM_PROCESSORS > 1
         if (_cfg.task_pinned_core < portNUM_PROCESSORS)
         {
-            xTaskCreatePinnedToCore(mic_task, "mic_task", stack_size, this, _cfg.task_priority, &_task_handle,
+            xTaskCreatePinnedToCore(mic_task,
+                                    "mic_task",
+                                    stack_size,
+                                    this,
+                                    _cfg.task_priority,
+                                    &_task_handle,
                                     _cfg.task_pinned_core);
         }
         else
@@ -375,9 +379,9 @@ namespace HAL
                     // accumulating and ensures fresh data when recording starts.
                     while (!ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20)))
                     {
-                        if (!self->_task_running) break;
-                        i2s_channel_read(self->_rx_chan, src_buf, dma_buf_len,
-                                         &src_len, 0);
+                        if (!self->_task_running)
+                            break;
+                        i2s_channel_read(self->_rx_chan, src_buf, dma_buf_len, &src_len, 0);
                     }
                     src_idx = ~0u;
                     src_len = 0;
