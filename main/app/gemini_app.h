@@ -4,6 +4,7 @@
 #include "settings/settings.h"
 #include "app/utils/anim/hl_text.h"
 #include "app/utils/anim/scroll_text.h"
+#include "app/s2s_client.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -11,31 +12,24 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/event_groups.h"
-#include "app/http_client.h"
 
-// Application state
 enum GeminiAppScreen
 {
     SCREEN_START,
     SCREEN_SETTINGS,
     SCREEN_QR_GEMINI,
-    SCREEN_QR_ELEVENLABS,
-    SCREEN_QR_DEEPGRAM,
     SCREEN_CHAT,
 };
 
-// Application state
 enum AppState
 {
     APP_STATE_IDLE,
     APP_STATE_DISCONNECTED,
-    APP_STATE_STREAM_ERROR,
     APP_STATE_CONNECTING_WIFI,
-    APP_STATE_CONNECTING_STT,
-    APP_STATE_LISTENING_MIC,
-    APP_STATE_CONNECTING_GEMINI,
-    APP_STATE_CONNECTING_TTS,
-    APP_STATE_TTS_PLAYING,
+    APP_STATE_S2S_CONNECTING,
+    APP_STATE_S2S_LISTENING,
+    APP_STATE_S2S_SPEAKING,
+    APP_STATE_S2S_ERROR,
 };
 
 enum HistoryItemType
@@ -44,15 +38,9 @@ enum HistoryItemType
     HISTORY_ITEM_TYPE_MODEL,
 };
 
-// Font sizes and spacing
 #define FONT_16 &fonts::efontEN_16
 #define TEXT_PADDING 5
-
-// Animation task parameters
-#define TTS_TASK_STACK_SIZE 4096
-#define TTS_TASK_PRIORITY 5
-#define TTS_TASK_CORE 1
-#define MAX_HISTORY_TURNS 5
+#define MAX_CHAT_LINES 1000
 
 class GeminiApp
 {
@@ -60,7 +48,6 @@ private:
     HAL::Hal* _hal;
     HAL::wifi_status_t _wifiStatus;
 
-    // animation sprite
     LGFX_Sprite* _sprite;
     AppState _appState;
     struct
@@ -75,53 +62,42 @@ private:
     GeminiAppScreen _currentScreen;
     std::vector<SETTINGS::SettingGroup_t> _groups;
 
-    // UI resources
     UTILS::HL_TEXT::HLTextContext_t* _hintTextContext = nullptr;
     UTILS::SCROLL_TEXT::ScrollTextContext_t* _descScrollContext = nullptr;
 
-    // Current conversation
+    // Chat display
     int _totalLines;
     std::string _userPrompt;
     std::string _partialPrompt;
-    std::string _apiResponse;
-    // for color highlight
     int _lastHistoryIndex;
     int _scrollPosition;
 
     std::vector<std::pair<int, std::string>> _chat;
-    std::vector<std::pair<std::string, std::string>> _history;
 
     EventGroupHandle_t _control_event_group = nullptr;
 
-    // Gemini API
-    static void gemini_task(void* parameter);
-    TaskHandle_t _gemini_task_handle = nullptr;
-    std::string get_response();
-    // Private methods
+    // S2S voice mode
+    S2SSharedData _s2s_shared;
+    bool _s2s_active = false;
+    void startS2S();
+    void stopS2S();
+
+    // Drawing
     bool drawMainScreen();
     void handleMainScreenInput();
     bool drawAnimation(bool need_update);
     void handleSettingsMenu();
-    void drawLoadingScreen();
 
     bool drawResponseScreen();
     void handleResponseScreenInput();
     void updateScrollPosition();
 
     bool drawGeminiQRScreen();
-    bool drawElevenLabsQRScreen();
-    bool drawDeepgramQRScreen();
     void handleApiKeyScreenInput();
 
-    void callGeminiAPI();
+    const char* getHintForState() const;
     std::vector<std::string> splitTextIntoLines(const std::string& text);
-
-    // TTS
-    void initTTS();
-    void startTTS();
-    void stopTTS();
-    static void tts_stream_task(void* parameter);
-    TaskHandle_t _tts_stream_task_handle = nullptr;
+    void trimChat();
 
 public:
     GeminiApp(HAL::Hal* hal);

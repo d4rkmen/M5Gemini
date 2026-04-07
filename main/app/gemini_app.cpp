@@ -4,17 +4,13 @@
 #include "esp_system.h"
 #include "app/utils/ui/dialog.h"
 #include "app/utils/ui/settings_screen.h"
+#include "app/utils/ui/key_repeat.h"
 #include "app/utils/theme/theme_define.h"
-#include "http_client.h"
-#include "ws_client.h"
-#include <format>
+#include "s2s_client.h"
 #include <vector>
-#include <utility>
 #include "assets/g_fonts.hpp"
 #include "assets/gemini_icon.h"
 #include "assets/qr_gemini.h"
-#include "assets/qr_elevenlabs.h"
-#include "assets/qr_deepgram.h"
 #include "assets/anm_disconnected.h"
 #include "assets/anm_wifi.h"
 #include "assets/anm_internet.h"
@@ -24,111 +20,63 @@
 
 #include "hal_cardputer.h"
 #include "wifi/wifi.h"
-#include "event_bits.h"
 
 static const char* TAG = "GEMINI_APP";
 static const char* GEMINI_NS = "gemini";
-static const char* HINT_MAIN = "[ENTER] NEW CHAT [ESC] SETTINGS";
-static const char* RESPONSE_HINT = "[UP][DOWN] [LEFT][RIGHT] [Fn][ENTER] [ESC]";
+static const char* HINT_MAIN = "[ENTER] START [ESC] SETTINGS";
 static const char* API_KEY_HINT = "[ENTER] [ESC]";
 
-// TTS configuration
-static const char* ELEVENLABS_NS = "elevenlabs";
-// STT configuration
-static const char* DEEPGRAM_NS = "deepgram";
-
 static bool is_repeat = false;
-static bool is_start = false;
-#define KEY_HOLD_MS 500
-#define KEY_REPEAT_MS 50
+static uint32_t next_fire_ts = 0xFFFFFFFF;
 static bool is_rendered = false;
-
-// #define FONT_14 &font_geist14
-
-// Animation constants
-#define ANIMATION_STACK_SIZE 4096
-#define ANIMATION_PRIORITY 1
-#define ANIMATION_CORE 1
-#define ANIMATION_FRAME_DELAY_MS 20
 
 #define HINT_HEIGHT 12
 
 extern const uint8_t snap_wav_start[] asm("_binary_snap_wav_start");
 extern const uint8_t snap_wav_end[] asm("_binary_snap_wav_end");
 
-#if 0
-static TimerHandle_t _logHeapTimer = nullptr;
+// ═══════════════════════════════════════════════════════════
+// Constructor / Destructor
+// ═══════════════════════════════════════════════════════════
 
-void logFreeHeapCallback(TimerHandle_t xTimer)
-{
-    static bool s_tick_tock = false;
-    ESP_LOGI("TIMER",
-             "%s uptime: %08lu, RAM: %lu, %lu free",
-             s_tick_tock ? "Tick" : "Tock",
-             (unsigned long)millis() / 1000,
-             (unsigned long)heap_caps_get_total_size(MALLOC_CAP_8BIT),
-             (unsigned long)esp_get_free_heap_size());
-    s_tick_tock = !s_tick_tock;
-}
-#endif
-// Constructor
 GeminiApp::GeminiApp(HAL::Hal* hal) : _hal(hal), _currentScreen(SCREEN_START), _scrollPosition(0)
 {
-    //
     _hal->canvas()->setFont(FONT_16);
     _hintTextContext = new UTILS::HL_TEXT::HLTextContext_t();
     UTILS::HL_TEXT::hl_text_init(_hintTextContext, _hal->canvas(), 20, 1500);
 
     _descScrollContext = new UTILS::SCROLL_TEXT::ScrollTextContext_t();
-    UTILS::SCROLL_TEXT::scroll_text_init(_descScrollContext,
-                                         _hal->canvas(),
-                                         _hal->canvas()->width(),
-                                         16,
-                                         20,    // scroll speed
-                                         1000); // pause time
+    UTILS::SCROLL_TEXT::scroll_text_init(_descScrollContext, _hal->canvas(), _hal->canvas()->width(), 16, 20, 1000);
 
-    // Create event group for synchronization and control
     _control_event_group = xEventGroupCreate();
-    // clear all bits
     xEventGroupClearBits(_control_event_group, 0xFFFFFF);
-    // Initialize the animation sprite
+
     _sprite = new LGFX_Sprite(_hal->canvas());
     _sprite->createSprite(50, 50);
 
-    // Initialize TTS resources
-    initTTS();
-    // create one second timer to log free heap size
-#if 0
-    _logHeapTimer = xTimerCreate("LogFreeHeap", pdMS_TO_TICKS(1000), pdTRUE, NULL, logFreeHeapCallback);
-    xTimerStart(_logHeapTimer, 0);
-#endif
+    _s2s_shared.mutex = xSemaphoreCreateMutex();
+    _s2s_active = false;
 }
 
-// Destructor
 GeminiApp::~GeminiApp()
 {
-#if 0
-    // Stop and delete the heap logging timer
-    if (_logHeapTimer != nullptr)
-    {
-        xTimerStop(_logHeapTimer, 0);
-        xTimerDelete(_logHeapTimer, 0);
-        _logHeapTimer = nullptr;
-    }
-#endif
+    stopS2S();
 
     _sprite->deleteSprite();
     delete _sprite;
 
-    // Clean up TTS resources
-    stopTTS();
     if (_control_event_group != nullptr)
     {
         vEventGroupDelete(_control_event_group);
         _control_event_group = nullptr;
     }
 
-    // Clean up settings screen resources
+    if (_s2s_shared.mutex)
+    {
+        vSemaphoreDelete(_s2s_shared.mutex);
+        _s2s_shared.mutex = nullptr;
+    }
+
     if (_hintTextContext)
     {
         UTILS::HL_TEXT::hl_text_free(_hintTextContext);
@@ -144,160 +92,64 @@ GeminiApp::~GeminiApp()
     }
 }
 
-// Initialize TTS resources
-void GeminiApp::initTTS()
+// ═══════════════════════════════════════════════════════════
+// S2S session management
+// ═══════════════════════════════════════════════════════════
+
+void GeminiApp::startS2S()
 {
-    ESP_LOGD(TAG, "Initializing TTS resources");
+    if (_s2s_active)
+        stopS2S();
 
-    // Initialize with task not running
-    xEventGroupClearBits(_control_event_group,
-                         TTS_STOP_REQUEST_BIT | TTS_PLAY_TASK_STARTED_BIT | TTS_PLAY_TASK_STOPPED_BIT |
-                             TTS_STREAM_TASK_STARTED_BIT | TTS_STREAM_TASK_STOPPED_BIT | TTS_PLAYBACK_START_REQUEST_BIT |
-                             TTS_PLAYBACK_STOP_REQUEST_BIT);
+    std::string api_key = _hal->settings()->getString(GEMINI_NS, "api_key");
+    std::string model = _hal->settings()->getString(GEMINI_NS, "model");
+    std::string voice = _hal->settings()->getString(GEMINI_NS, "voice");
+    std::string rules = _hal->settings()->getString(GEMINI_NS, "rules");
+    int32_t volume = _hal->settings()->getNumber(GEMINI_NS, "volume");
 
-    _tts_stream_task_handle = nullptr;
-}
-
-// Start TTS processing in a separate task
-void GeminiApp::startTTS()
-{
-    ESP_LOGD(TAG, "Starting TTS for text: %ld characters", (uint32_t)_apiResponse.length());
-
-    // Check if TTS is enabled and configured
-    if (!_hal->settings()->getBool(ELEVENLABS_NS, "enabled"))
+    if (api_key.empty())
     {
-        ESP_LOGE(TAG, "TTS is disabled, skipping");
-        return;
-    }
-    if (_hal->settings()->getString(ELEVENLABS_NS, "api_key").empty())
-    {
-        UTILS::UI::show_error_dialog(_hal, "Failed", "ElevenLabs API key not set. Please go to ElevenLabs settings", "OK");
-        return;
-    }
-    if (_hal->settings()->getString(ELEVENLABS_NS, "voice").empty())
-    {
-        UTILS::UI::show_error_dialog(_hal, "Failed", "ElevenLabs voice not set. Please go to ElevenLabs settings", "OK");
-        return;
-    }
-    if (_hal->settings()->getString(ELEVENLABS_NS, "model").empty())
-    {
-        UTILS::UI::show_error_dialog(_hal, "Failed", "ElevenLabs model not set. Please go to ElevenLabs settings", "OK");
-        return;
-    }
-    if (_apiResponse.empty())
-    {
-        UTILS::UI::show_error_dialog(_hal, "Failed", "Text to speak is empty", "OK");
+        UTILS::UI::show_error_dialog(_hal, "Failed", "API key not set. Please go to settings", "OK");
         return;
     }
 
-    // Stop any existing TTS task gracefully
-    stopTTS();
-
-    if ((xEventGroupGetBits(_control_event_group) & (TTS_PLAY_TASK_STARTED_BIT | TTS_STREAM_TASK_STARTED_BIT)) ==
-        (TTS_PLAY_TASK_STARTED_BIT | TTS_STREAM_TASK_STARTED_BIT))
+    if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(200)) == pdTRUE)
     {
-        // Wait for the previous task to finish (with a timeout)
-        ESP_LOGD(TAG, "Waiting for previous TTS task to exit...");
-        EventBits_t bits = xEventGroupWaitBits(_control_event_group,
-                                               TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT,
-                                               pdFALSE,
-                                               pdTRUE,
-                                               pdMS_TO_TICKS(5000) // 5-second timeout
-        );
-
-        if ((bits & TTS_PLAY_TASK_STOPPED_BIT) != TTS_PLAY_TASK_STOPPED_BIT)
-        {
-            ESP_LOGW(TAG, "Timeout waiting for playback task to exit. Task might still be running.");
-            // Proceed with caution, old task might not have cleaned up fully
-        }
-        if ((bits & TTS_STREAM_TASK_STOPPED_BIT) != TTS_STREAM_TASK_STOPPED_BIT)
-        {
-            ESP_LOGW(TAG, "Timeout waiting for HTTP task to exit. Task might still be running.");
-        }
-        if ((bits & (TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT)) ==
-            (TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT))
-        {
-            ESP_LOGD(TAG, "Previous TTS task exited");
-        }
+        _s2s_shared.input_transcript.clear();
+        _s2s_shared.output_transcript.clear();
+        xSemaphoreGive(_s2s_shared.mutex);
     }
 
-    // Clear any lingering stop request from the previous stop call
-    xEventGroupClearBits(_control_event_group,
-                         TTS_STOP_REQUEST_BIT | TTS_PLAY_TASK_STARTED_BIT | TTS_PLAY_TASK_STOPPED_BIT |
-                             TTS_STREAM_TASK_STARTED_BIT | TTS_STREAM_TASK_STOPPED_BIT | TTS_PLAYBACK_START_REQUEST_BIT |
-                             TTS_PLAYBACK_STOP_REQUEST_BIT);
-    // Ensure speaker is initialized (may have been shut down for mic recording)
-    if (!_hal->speaker()->isRunning())
+    if (s2s_start(_hal, _control_event_group, &_s2s_shared, api_key, model, voice, rules, volume))
     {
-        if (!_hal->speaker()->begin())
-        {
-            ESP_LOGE(TAG, "Failed to start speaker for TTS");
-            return;
-        }
-    }
-    // set system volume
-    _hal->speaker()->setVolume(255);
-    _hal->speaker()->setChannelVolume(AUDIO_CHANNEL, _hal->settings()->getNumber(ELEVENLABS_NS, "volume"));
-    // Create the new TTS task
-    BaseType_t result =
-        xTaskCreate(tts_stream_task, "tts_stream_task", TTS_TASK_STACK_SIZE, this, TTS_TASK_PRIORITY, &_tts_stream_task_handle);
-
-    if (result != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to create TTS task");
-        _tts_stream_task_handle = nullptr;
+        _s2s_active = true;
+        setState(APP_STATE_S2S_CONNECTING);
     }
     else
     {
-        ESP_LOGD(TAG, "HTTP TTS task created successfully");
-        // Set the running bit
+        UTILS::UI::show_error_dialog(_hal, "Failed", "Could not start S2S session", "OK");
+        setState(APP_STATE_IDLE);
     }
 }
 
-// Stop running TTS task gracefully
-void GeminiApp::stopTTS()
+void GeminiApp::stopS2S()
 {
-    // Signal the task to stop
-    ESP_LOGD(TAG, "Setting stop request bit for TTS task");
-    xEventGroupSetBits(_control_event_group, TTS_STOP_REQUEST_BIT);
+    if (!_s2s_active)
+        return;
+    s2s_stop();
+    _s2s_active = false;
 }
 
-// TTS task code - handles calling the ElevenLabs API
-void GeminiApp::tts_stream_task(void* parameter)
-{
-    GeminiApp* app = static_cast<GeminiApp*>(parameter);
-    HAL::Hal* hal = app->_hal;
-    EventGroupHandle_t control_event_group = app->_control_event_group;
-    TaskHandle_t task_handle = app->_tts_stream_task_handle;
-    std::string text_to_process = app->_apiResponse;
-    std::string api_key = hal->settings()->getString(ELEVENLABS_NS, "api_key");
-    std::string voice_id = hal->settings()->getString(ELEVENLABS_NS, "voice");
-    std::string model_id = hal->settings()->getString(ELEVENLABS_NS, "model");
-    xEventGroupSetBits(control_event_group, TTS_STREAM_TASK_STARTED_BIT);
+// ═══════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════
 
-    ESP_LOGI(TAG, "TTS stream task started, text=%d chars", (int)text_to_process.length());
-    // Pass the control event group to the API call
-    std::string result = call_11labs_api(hal, api_key, voice_id, text_to_process, model_id, control_event_group);
-    ESP_LOGI(TAG, "TTS stream task: API returned: %s", result.c_str());
-
-    // Clear the running bit and any pending stop request in the control event group
-    if (control_event_group != nullptr)
-    {
-        xEventGroupSetBits(control_event_group, TTS_STREAM_TASK_STOPPED_BIT);
-    }
-
-    ESP_LOGD(TAG, "HTTP TTS task completed and exiting (Handle: %p)", task_handle);
-    vTaskDelete(NULL); // Task deletes itself
-}
-
-// Initialize the application
 void GeminiApp::init()
 {
     ESP_LOGI(TAG, "Initializing");
     setState(APP_STATE_DISCONNECTED);
-    // Get settings metadata and set up group callbacks
+
     _groups = _hal->settings()->getMetadata();
-    // group 2 = Gemini: show QR code if API key empty
     _groups[2].callback = [this](SETTINGS::SettingGroup_t& group)
     {
         if (_hal->settings()->getString("gemini", "api_key").empty())
@@ -306,31 +158,12 @@ void GeminiApp::init()
             is_rendered = false;
         }
     };
-    // group 3 = ElevenLabs: show QR code if API key empty
-    _groups[3].callback = [this](SETTINGS::SettingGroup_t& group)
-    {
-        if (_hal->settings()->getString("elevenlabs", "api_key").empty())
-        {
-            _currentScreen = SCREEN_QR_ELEVENLABS;
-            is_rendered = false;
-        }
-    };
-    // group 4 = Deepgram: show QR code if API key empty
-    _groups[4].callback = [this](SETTINGS::SettingGroup_t& group)
-    {
-        if (_hal->settings()->getString("deepgram", "api_key").empty())
-        {
-            _currentScreen = SCREEN_QR_DEEPGRAM;
-            is_rendered = false;
-        }
-    };
-    // Initialize WiFi module
+
     if (_hal->wifi()->init())
     {
         _hal->wifi()->set_status_callback(
             [this](HAL::wifi_status_t status)
             {
-                ESP_LOGI(TAG, "WiFi status changed to %d", status);
                 _wifiStatus = status;
                 switch (status)
                 {
@@ -348,44 +181,63 @@ void GeminiApp::init()
                     break;
                 }
             });
-        // Connect to WiFi if enabled
         if (_hal->settings()->getBool("wifi", "enabled"))
-        {
             _hal->wifi()->connect();
-        }
     }
-    // set brightness
+
     int brightness = _hal->settings()->getNumber("system", "brightness");
     if (brightness > 0)
         _hal->display()->setBrightness(brightness);
-    // set volume
+
     int volume = _hal->settings()->getNumber("system", "volume");
     if (volume > 0)
     {
         _hal->speaker()->setVolume(255);
         _hal->speaker()->setChannelVolume(SYSTEM_CHANNEL, volume);
     }
-    // play boot sound
+
     if (_hal->settings()->getBool("system", "boot_sound"))
         _hal->speaker()->playWav(snap_wav_start, snap_wav_end - snap_wav_start, 1, SYSTEM_CHANNEL);
-    // Set initial state
+
     _currentScreen = SCREEN_START;
     is_rendered = false;
 }
 
+// ═══════════════════════════════════════════════════════════
+// Hints
+// ═══════════════════════════════════════════════════════════
+
+const char* GeminiApp::getHintForState() const
+{
+    switch (_appState)
+    {
+    case APP_STATE_S2S_LISTENING:
+        return "[ENTER] SEND [\u2191][\u2193] SCROLL [ESC] STOP";
+    case APP_STATE_S2S_SPEAKING:
+        return "[ENTER] SKIP [\u2191][\u2193] SCROLL [ESC] STOP";
+    case APP_STATE_S2S_CONNECTING:
+    case APP_STATE_S2S_ERROR:
+        return "[ESC] CANCEL";
+    default:
+        return "[\u2191][\u2193][\u2190][\u2192] SCROLL [ESC] BACK";
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // Main update loop
+// ═══════════════════════════════════════════════════════════
+
 void GeminiApp::update()
 {
     bool need_update = false;
-    // read bits
     EventBits_t bits = xEventGroupGetBits(_control_event_group);
+
     switch (_currentScreen)
     {
     case SCREEN_START:
         need_update |= drawMainScreen();
         need_update |= drawAnimation(need_update);
         handleMainScreenInput();
-        // Draw hint at bottom
         need_update |= UTILS::HL_TEXT::hl_text_render(_hintTextContext,
                                                       HINT_MAIN,
                                                       0,
@@ -393,40 +245,12 @@ void GeminiApp::update()
                                                       TFT_DARKGREY,
                                                       TFT_WHITE,
                                                       THEME_COLOR_BG);
-
-        // Update the display
         if (need_update)
             _hal->canvas_update();
-
         break;
+
     case SCREEN_QR_GEMINI:
         need_update |= drawGeminiQRScreen();
-        handleApiKeyScreenInput();
-        need_update |= UTILS::HL_TEXT::hl_text_render(_hintTextContext,
-                                                      API_KEY_HINT,
-                                                      65,
-                                                      _hal->canvas()->height() - HINT_HEIGHT,
-                                                      TFT_DARKGREY,
-                                                      TFT_WHITE,
-                                                      THEME_COLOR_BG);
-        if (need_update)
-            _hal->canvas_update();
-        break;
-    case SCREEN_QR_ELEVENLABS:
-        need_update |= drawElevenLabsQRScreen();
-        handleApiKeyScreenInput();
-        need_update |= UTILS::HL_TEXT::hl_text_render(_hintTextContext,
-                                                      API_KEY_HINT,
-                                                      65,
-                                                      _hal->canvas()->height() - HINT_HEIGHT,
-                                                      TFT_DARKGREY,
-                                                      TFT_WHITE,
-                                                      THEME_COLOR_BG);
-        if (need_update)
-            _hal->canvas_update();
-        break;
-    case SCREEN_QR_DEEPGRAM:
-        need_update |= drawDeepgramQRScreen();
         handleApiKeyScreenInput();
         need_update |= UTILS::HL_TEXT::hl_text_render(_hintTextContext,
                                                       API_KEY_HINT,
@@ -444,144 +268,151 @@ void GeminiApp::update()
         break;
 
     case SCREEN_CHAT:
+        // ── S2S state machine ──
         switch (_appState)
         {
         case APP_STATE_DISCONNECTED:
-            break;
-        case APP_STATE_STREAM_ERROR:
-            if (!(bits & STT_STREAM_ERROR_BIT))
-            {
-                setState(APP_STATE_CONNECTING_STT);
-                is_rendered = false;
-            }
-            break;
         case APP_STATE_CONNECTING_WIFI:
-            break;
-        case APP_STATE_CONNECTING_STT:
-            if (bits & STT_STREAM_CONNECTED_BIT)
-            {
-                setState(APP_STATE_LISTENING_MIC);
-                _partialPrompt = "";
-                is_rendered = false;
-            }
-            else if (bits & STT_STREAM_ERROR_BIT)
-            {
-                setState(APP_STATE_STREAM_ERROR);
-                _partialPrompt = "";
-                is_rendered = false;
-            }
-            break;
-        case APP_STATE_LISTENING_MIC:
-            if (bits & STT_TRANSCRIPT_BIT)
-            {
-                setState(APP_STATE_CONNECTING_GEMINI);
-                xEventGroupClearBits(_control_event_group, STT_TRANSCRIPT_BIT);
-                _userPrompt = get_transcript();
-                _lastHistoryIndex = _chat.size();
-                for (const auto& line : splitTextIntoLines(_userPrompt))
-                    _chat.push_back({HISTORY_ITEM_TYPE_USER, line});
-                _partialPrompt = "";
-                updateScrollPosition();
-                deepgram_streaming_stop();
-                callGeminiAPI();
-                is_rendered = false;
-            }
-            else if (bits & STT_PARTIAL_TRANSCRIPT_BIT)
-            {
-                _partialPrompt = get_transcript();
-                updateScrollPosition();
-                xEventGroupClearBits(_control_event_group, STT_PARTIAL_TRANSCRIPT_BIT);
-                is_rendered = false;
-            }
-            if (!(bits & STT_STREAM_CONNECTED_BIT))
-            {
-                setState(APP_STATE_CONNECTING_STT);
-                is_rendered = false;
-            }
-            break;
-        case APP_STATE_CONNECTING_GEMINI:
-            if (bits & GEMINI_TASK_STOPPED_BIT)
-            {
-                xEventGroupClearBits(_control_event_group, GEMINI_TASK_STOPPED_BIT);
-                if (_apiResponse.find("Error:") == 0)
-                {
-                    UTILS::UI::show_error_dialog(_hal, "API error", _apiResponse, "OK");
-                    if (_history.empty())
-                        _currentScreen = SCREEN_START;
-                    else
-                        _currentScreen = SCREEN_CHAT;
-                    setState(APP_STATE_IDLE);
-                    is_rendered = false;
-                }
-                else
-                {
-                    for (const auto& line : splitTextIntoLines(_apiResponse))
-                        _chat.push_back({HISTORY_ITEM_TYPE_MODEL, line});
-                    _history.push_back({_userPrompt, _apiResponse});
-                    while (_history.size() > MAX_HISTORY_TURNS)
-                        _history.erase(_history.begin());
-                    _partialPrompt = "";
-                    updateScrollPosition();
-                    _currentScreen = SCREEN_CHAT;
-                    is_rendered = false;
-
-                    if (_hal->settings()->getBool(ELEVENLABS_NS, "enabled") &&
-                        !_hal->settings()->getString(ELEVENLABS_NS, "api_key").empty())
-                    {
-                        setState(APP_STATE_CONNECTING_TTS);
-                        startTTS();
-                    }
-                    else
-                    {
-                        setState(APP_STATE_IDLE);
-                    }
-                }
-            }
-            break;
-        case APP_STATE_CONNECTING_TTS:
-            if (bits & TTS_PLAYBACK_START_REQUEST_BIT)
-            {
-                setState(APP_STATE_TTS_PLAYING);
-                is_rendered = false;
-            }
-            break;
-        case APP_STATE_TTS_PLAYING:
-            if ((bits & (TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT)) ==
-                (TTS_PLAY_TASK_STOPPED_BIT | TTS_STREAM_TASK_STOPPED_BIT))
-            {
-                _partialPrompt = "";
-                setState(APP_STATE_IDLE);
-                is_rendered = false;
-            }
-            break;
         case APP_STATE_IDLE:
-            if (_wifiStatus > HAL::WIFI_STATUS_CONNECTING)
+            break;
+
+        case APP_STATE_S2S_CONNECTING:
+            if (bits & S2S_SETUP_COMPLETE_BIT)
             {
-                if (_hal->settings()->getBool("deepgram", "enabled"))
-                {
-                    setState(APP_STATE_CONNECTING_STT);
-                    if (deepgram_streaming_start(_hal, _control_event_group))
-                    {
-                        _currentScreen = SCREEN_CHAT;
-                    }
-                    else
-                    {
-                        UTILS::UI::show_error_dialog(_hal, "Failed", "Failed to start Deepgram streaming", "OK");
-                        _currentScreen = SCREEN_START;
-                        setState(APP_STATE_IDLE);
-                    }
-                }
+                setState(APP_STATE_S2S_LISTENING);
                 is_rendered = false;
-                break;
+            }
+            else if (bits & S2S_ERROR_BIT)
+            {
+                setState(APP_STATE_S2S_ERROR);
+                is_rendered = false;
+            }
+            break;
+
+        case APP_STATE_S2S_LISTENING:
+        {
+            if (bits & S2S_INPUT_TRANSCRIPT_BIT)
+            {
+                xEventGroupClearBits(_control_event_group, S2S_INPUT_TRANSCRIPT_BIT);
+                if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    _partialPrompt = _s2s_shared.input_transcript;
+                    xSemaphoreGive(_s2s_shared.mutex);
+                }
+                updateScrollPosition();
+                is_rendered = false;
+            }
+
+            if ((bits & S2S_MODEL_SPEAKING_BIT) && !(bits & S2S_LISTENING_BIT))
+            {
+                if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    _userPrompt = _s2s_shared.input_transcript;
+                    _s2s_shared.input_transcript.clear();
+                    _s2s_shared.output_transcript.clear();
+                    xSemaphoreGive(_s2s_shared.mutex);
+                }
+                if (!_userPrompt.empty())
+                {
+                    _lastHistoryIndex = _chat.size();
+                    for (const auto& line : splitTextIntoLines(_userPrompt))
+                        _chat.push_back({HISTORY_ITEM_TYPE_USER, line});
+                    trimChat();
+                }
+                _partialPrompt = "";
+                updateScrollPosition();
+                setState(APP_STATE_S2S_SPEAKING);
+                is_rendered = false;
+            }
+
+            if (bits & (S2S_ERROR_BIT | S2S_TASK_STOPPED_BIT))
+            {
+                setState(APP_STATE_S2S_ERROR);
+                is_rendered = false;
             }
             break;
         }
+
+        case APP_STATE_S2S_SPEAKING:
+        {
+            // Late-arriving input transcript (server often sends after model starts speaking)
+            if ((bits & S2S_INPUT_TRANSCRIPT_BIT) && _userPrompt.empty())
+            {
+                xEventGroupClearBits(_control_event_group, S2S_INPUT_TRANSCRIPT_BIT);
+                if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    _userPrompt = _s2s_shared.input_transcript;
+                    xSemaphoreGive(_s2s_shared.mutex);
+                }
+                if (!_userPrompt.empty())
+                {
+                    _lastHistoryIndex = _chat.size();
+                    for (const auto& line : splitTextIntoLines(_userPrompt))
+                        _chat.push_back({HISTORY_ITEM_TYPE_USER, line});
+                    trimChat();
+                    updateScrollPosition();
+                    is_rendered = false;
+                }
+            }
+
+            if (bits & S2S_OUTPUT_TRANSCRIPT_BIT)
+            {
+                xEventGroupClearBits(_control_event_group, S2S_OUTPUT_TRANSCRIPT_BIT);
+                if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    _partialPrompt = _s2s_shared.output_transcript;
+                    xSemaphoreGive(_s2s_shared.mutex);
+                }
+                updateScrollPosition();
+                is_rendered = false;
+            }
+
+            if ((bits & S2S_LISTENING_BIT) && !(bits & S2S_MODEL_SPEAKING_BIT))
+            {
+                std::string model_text;
+                if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    model_text = _s2s_shared.output_transcript;
+                    _s2s_shared.output_transcript.clear();
+                    xSemaphoreGive(_s2s_shared.mutex);
+                }
+                if (!model_text.empty())
+                {
+                    for (const auto& line : splitTextIntoLines(model_text))
+                        _chat.push_back({HISTORY_ITEM_TYPE_MODEL, line});
+                    trimChat();
+                }
+                _partialPrompt = "";
+                updateScrollPosition();
+                setState(APP_STATE_S2S_LISTENING);
+                is_rendered = false;
+            }
+
+            if (bits & (S2S_ERROR_BIT | S2S_TASK_STOPPED_BIT))
+            {
+                setState(APP_STATE_S2S_ERROR);
+                is_rendered = false;
+            }
+            break;
+        }
+
+        case APP_STATE_S2S_ERROR:
+            if (bits & S2S_TASK_STOPPED_BIT)
+            {
+                ESP_LOGW(TAG, "S2S session ended, attempting reconnect");
+                stopS2S();
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                startS2S();
+                is_rendered = false;
+            }
+            break;
+        }
+
         need_update |= drawResponseScreen();
         need_update |= drawAnimation(need_update);
         handleResponseScreenInput();
-        // Draw hint at bottom
         need_update |= UTILS::HL_TEXT::hl_text_render(_hintTextContext,
-                                                      RESPONSE_HINT,
+                                                      getHintForState(),
                                                       0,
                                                       _hal->canvas()->height() - HINT_HEIGHT,
                                                       TFT_DARKGREY,
@@ -589,47 +420,37 @@ void GeminiApp::update()
                                                       THEME_COLOR_BG);
         if (need_update)
             _hal->canvas_update();
-
         break;
     }
 }
 
-// Draw the main screen
+// ═══════════════════════════════════════════════════════════
+// Main screen
+// ═══════════════════════════════════════════════════════════
+
 bool GeminiApp::drawMainScreen()
 {
     if (is_rendered)
         return false;
 
-    // Clear history when returning to main screen
-    _history.clear();
     _chat.clear();
     _partialPrompt = "";
 
-    // Clear the screen
     _hal->canvas()->fillScreen(THEME_COLOR_BG);
-
-    // Draw header
     _hal->canvas()->fillRect(0, 0, _hal->canvas()->width(), 20, THEME_COLOR_BG);
     _hal->canvas()->setTextColor(THEME_COLOR_TITLE);
     _hal->canvas()->setFont(FONT_16);
+
     int offestY = TEXT_PADDING;
     int lineHeight = _hal->canvas()->fontHeight(FONT_16);
     _hal->canvas()->drawCenterString("Gemini AI", _hal->canvas()->width() / 2, offestY);
     offestY += lineHeight * 2;
     _hal->canvas()->pushImage((_hal->canvas()->width() - 64) / 2, offestY, 64, 64, image_data_gemini_icon, TFT_BLACK);
-    // draw STT enabled
-    if (_hal->settings()->getBool("deepgram", "enabled") && !_hal->settings()->getString("deepgram", "api_key").empty())
-    {
-        _hal->canvas()->pushImage((_hal->canvas()->width() - 64) / 2 - 50 - 8, offestY + 7, 50, 50, image_data_mic, TFT_BLACK);
-    }
-    // draw TTS enabled
-    if (_hal->settings()->getBool("elevenlabs", "enabled") && !_hal->settings()->getString("elevenlabs", "api_key").empty())
-    {
-        _hal->canvas()
-            ->pushImage((_hal->canvas()->width() - 64) / 2 + 64 + 8, offestY + 7, 50, 50, image_data_playing3, TFT_BLACK);
-    }
+
+    _hal->canvas()->pushImage((_hal->canvas()->width() - 64) / 2 - 50 - 8, offestY + 7, 50, 50, image_data_mic, TFT_BLACK);
+    _hal->canvas()->pushImage((_hal->canvas()->width() - 64) / 2 + 64 + 8, offestY + 7, 50, 50, image_data_playing3, TFT_BLACK);
+
     offestY += 64 + 2;
-    // Draw main content area
     _hal->canvas()->setTextColor(TFT_WHITE);
     _hal->canvas()->drawCenterString("v" BUILD_NUMBER, _hal->canvas()->width() / 2, offestY);
 
@@ -637,7 +458,6 @@ bool GeminiApp::drawMainScreen()
     return true;
 }
 
-// Handle input on the main screen
 void GeminiApp::handleMainScreenInput()
 {
     _hal->keyboard()->updateKeyList();
@@ -647,52 +467,21 @@ void GeminiApp::handleMainScreenInput()
     {
         _hal->keyboard()->waitForRelease(KEY_NUM_ENTER);
         _hal->playNextSound();
-        // hold Fn to keep last prompt
         is_rendered = false;
-        // Check if we have API key and WiFi credentials
+
         if (_hal->settings()->getString(GEMINI_NS, "api_key").empty())
         {
-            UTILS::UI::show_error_dialog(_hal, "Failed", "API key not set. Please go to settings", "OK");
+            UTILS::UI::show_error_dialog(_hal, "Failed", "API key not set. Go to settings", "OK");
             return;
         }
-
-        // Try to connect to WiFi
         if (!_hal->settings()->getBool("wifi", "enabled"))
         {
-            UTILS::UI::show_error_dialog(_hal, "Failed", "WiFi is disabled, check settings", "OK");
+            UTILS::UI::show_error_dialog(_hal, "Failed", "WiFi is disabled", "OK");
             return;
         }
-        _partialPrompt = "";
-        // hold Fn to enter first prompt
-        if (_hal->settings()->getBool("deepgram", "enabled") && !_hal->keyboard()->keysState().fn)
-        {
-            _currentScreen = SCREEN_CHAT;
-            is_rendered = false;
-        }
-        else
-        {
-            if (!_hal->keyboard()->keysState().fn)
-                _userPrompt = "";
-            // Show the input dialog to get user's prompt
-            bool result = UTILS::UI::show_edit_string_dialog(_hal, "Enter your prompt", _userPrompt, false, 1000);
 
-            if (result && !_userPrompt.empty())
-            {
-                setState(APP_STATE_CONNECTING_GEMINI);
-                xEventGroupClearBits(_control_event_group, STT_TRANSCRIPT_BIT);
-                // Call the API asynchronously to start the task
-                // _history.push_back({_userPrompt, "..."});
-                _lastHistoryIndex = _chat.size();
-                for (const auto& line : splitTextIntoLines(_userPrompt))
-                    _chat.push_back({HISTORY_ITEM_TYPE_USER, line});
-                _partialPrompt = "";
-                updateScrollPosition();
-                callGeminiAPI();
-                // Connect to WiFi and call API
-                _currentScreen = SCREEN_CHAT;
-                is_rendered = false;
-            }
-        }
+        _currentScreen = SCREEN_CHAT;
+        startS2S();
     }
     else if (_hal->keyboard()->isKeyPressing(KEY_NUM_ESC))
     {
@@ -700,15 +489,16 @@ void GeminiApp::handleMainScreenInput()
         _hal->playNextSound();
         _currentScreen = SCREEN_SETTINGS;
         setState(APP_STATE_IDLE);
-        // UTILS::UI::SETTINGS_SCREEN::reset();
         is_rendered = false;
     }
 }
 
-// Handle the settings menu (render and input)
+// ═══════════════════════════════════════════════════════════
+// Settings & QR
+// ═══════════════════════════════════════════════════════════
+
 void GeminiApp::handleSettingsMenu()
 {
-    // Update the settings screen
     bool need_update = UTILS::UI::SETTINGS_SCREEN::update(_hal,
                                                           _groups,
                                                           _hintTextContext,
@@ -718,15 +508,46 @@ void GeminiApp::handleSettingsMenu()
                                                               _currentScreen = SCREEN_START;
                                                               is_rendered = false;
                                                           });
-
-    // Update the display if needed
     if (need_update)
-    {
         _hal->canvas_update();
+}
+
+bool GeminiApp::drawGeminiQRScreen()
+{
+    if (is_rendered)
+        return false;
+    _hal->canvas()->fillScreen(THEME_COLOR_BG);
+    _hal->canvas()->pushImage(0, 0, 135, 135, image_data_qr_gemini);
+    _hal->canvas()->setFont(FONT_16);
+    _hal->canvas()->setTextColor(THEME_COLOR_TITLE);
+    int center_x = _hal->canvas()->height() + (_hal->canvas()->width() - _hal->canvas()->height()) / 2;
+    _hal->canvas()->drawCenterString("Gemini", center_x, _hal->canvas()->height() / 2 - _hal->canvas()->fontWidth());
+    _hal->canvas()->setTextColor(TFT_LIGHTGREY);
+    _hal->canvas()->drawCenterString("Get API key", center_x, _hal->canvas()->height() / 2 + _hal->canvas()->fontWidth());
+    is_rendered = true;
+    return true;
+}
+
+void GeminiApp::handleApiKeyScreenInput()
+{
+    _hal->keyboard()->updateKeyList();
+    _hal->keyboard()->updateKeysState();
+    if (_hal->keyboard()->isPressed())
+    {
+        if (_hal->keyboard()->isKeyPressing(KEY_NUM_ESC) || _hal->keyboard()->isKeyPressing(KEY_NUM_ENTER))
+        {
+            _hal->keyboard()->waitForRelease(KEY_NUM_ESC);
+            _hal->playNextSound();
+            _currentScreen = SCREEN_SETTINGS;
+            is_rendered = false;
+        }
     }
 }
 
-// Split text into lines that fit the screen width
+// ═══════════════════════════════════════════════════════════
+// Response / Chat screen
+// ═══════════════════════════════════════════════════════════
+
 std::vector<std::string> GeminiApp::splitTextIntoLines(const std::string& text)
 {
     std::vector<std::string> lines;
@@ -740,37 +561,217 @@ std::vector<std::string> GeminiApp::splitTextIntoLines(const std::string& text)
             currentLine.clear();
             continue;
         }
-
         currentLine += c;
-
-        // Check if line is too long
         if (_hal->canvas()->textWidth(currentLine.c_str(), FONT_14) > _hal->canvas()->width() - (TEXT_PADDING * 2))
         {
-            // Find last space to break at
             size_t lastSpace = currentLine.find_last_of(' ');
             if (lastSpace != std::string::npos)
             {
-                std::string lineToAdd = currentLine.substr(0, lastSpace);
-                lines.push_back(lineToAdd);
+                lines.push_back(currentLine.substr(0, lastSpace));
                 currentLine = currentLine.substr(lastSpace + 1);
             }
             else
             {
-                // No space found, just break at current position
                 lines.push_back(currentLine);
                 currentLine.clear();
             }
         }
     }
-
-    // Add any remaining text
     if (!currentLine.empty())
-    {
         lines.push_back(currentLine);
-    }
-
     return lines;
 }
+
+bool GeminiApp::drawResponseScreen()
+{
+    if (is_rendered)
+        return false;
+    int scrollbar_width = 5;
+    _hal->canvas()->fillScreen(THEME_COLOR_BG);
+    _hal->canvas()->setFont(FONT_14);
+
+    int textStartY = TEXT_PADDING;
+    int textHeight = _hal->canvas()->height() - textStartY - HINT_HEIGHT;
+
+    if (_chat.empty() && _partialPrompt.empty())
+    {
+        const char* status_text = "connecting...";
+        if (_appState == APP_STATE_S2S_LISTENING)
+            status_text = "listening...";
+        else if (_appState == APP_STATE_S2S_SPEAKING)
+            status_text = "speaking...";
+        else if (_appState == APP_STATE_S2S_ERROR)
+            status_text = "reconnecting...";
+
+        _hal->canvas()->setTextColor(TFT_DARKGRAY);
+        _hal->canvas()->drawCenterString(status_text, _hal->canvas()->width() / 2, _hal->canvas()->height() / 2, FONT_16);
+    }
+    else
+    {
+        int lineHeight = _hal->canvas()->fontHeight(FONT_14);
+        int maxVisibleLines = textHeight / lineHeight;
+        std::vector<std::string> partial_prompt = splitTextIntoLines(_partialPrompt);
+        _totalLines = _chat.size() + partial_prompt.size();
+
+        if (_scrollPosition > _totalLines - maxVisibleLines)
+            _scrollPosition = std::max(0, _totalLines - maxVisibleLines);
+
+        // Partial prompt type depends on current state:
+        // listening → user input transcript, speaking → model output transcript
+        bool partial_is_user = (_appState == APP_STATE_S2S_LISTENING);
+
+        for (int i = 0; i < maxVisibleLines && i + _scrollPosition < _totalLines; i++)
+        {
+            int y = textStartY + (i * lineHeight);
+            int idx = i + _scrollPosition;
+
+            bool is_partial = (idx >= (int)_chat.size());
+            bool is_user;
+            if (is_partial)
+                is_user = partial_is_user;
+            else
+                is_user = (_chat[idx].first == HISTORY_ITEM_TYPE_USER);
+
+            bool is_last = idx >= _lastHistoryIndex;
+
+            if (is_user)
+            {
+                _hal->canvas()->fillRect(0, y, TEXT_PADDING - 1, lineHeight, is_last ? TFT_WHITE : TFT_DARKGRAY);
+                _hal->canvas()->setTextColor(is_last ? THEME_COLOR_TITLE : THEME_COLOR_TITLE_HISTORY);
+            }
+            else
+            {
+                _hal->canvas()->fillRect(0,
+                                         y,
+                                         TEXT_PADDING - 1,
+                                         lineHeight,
+                                         is_last ? THEME_COLOR_TITLE : THEME_COLOR_TITLE_HISTORY);
+                _hal->canvas()->setTextColor(is_last ? TFT_WHITE : TFT_DARKGRAY);
+            }
+
+            _hal->canvas()->drawString(is_partial ? partial_prompt[idx - _chat.size()].c_str() : _chat[idx].second.c_str(),
+                                       TEXT_PADDING,
+                                       y);
+        }
+
+        int scrollbar_height = lineHeight * maxVisibleLines;
+        if (_totalLines > maxVisibleLines)
+        {
+            int sx = _hal->canvas()->width() - scrollbar_width - 1;
+            _hal->canvas()->drawRect(sx, textStartY, scrollbar_width, scrollbar_height, TFT_DARKGREY);
+            int th = scrollbar_height * maxVisibleLines / _totalLines;
+            int tp = textStartY + (scrollbar_height - th) * _scrollPosition / (_totalLines - maxVisibleLines);
+            _hal->canvas()->fillRect(sx, tp, scrollbar_width, th, TFT_ORANGE);
+        }
+    }
+    is_rendered = true;
+    return true;
+}
+
+void GeminiApp::handleResponseScreenInput()
+{
+    int lineHeight = _hal->canvas()->fontHeight(FONT_14);
+    int textHeight = _hal->canvas()->height() - 14;
+    int maxVisibleLines = textHeight / lineHeight;
+    _hal->keyboard()->updateKeyList();
+    _hal->keyboard()->updateKeysState();
+
+    if (_hal->keyboard()->isPressed())
+    {
+        uint32_t now = millis();
+
+        if (_hal->keyboard()->isKeyPressing(KEY_NUM_UP))
+        {
+            if (key_repeat_check(is_repeat, next_fire_ts, now))
+            {
+                if (_scrollPosition > 0)
+                {
+                    _scrollPosition--;
+                    is_rendered = false;
+                }
+            }
+        }
+        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_DOWN))
+        {
+            if (key_repeat_check(is_repeat, next_fire_ts, now))
+            {
+                if (_scrollPosition < _totalLines - maxVisibleLines)
+                {
+                    _scrollPosition++;
+                    is_rendered = false;
+                }
+            }
+        }
+        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
+        {
+            if (key_repeat_check(is_repeat, next_fire_ts, now))
+            {
+                if (_scrollPosition > 0)
+                {
+                    _scrollPosition = std::max(0, _scrollPosition - maxVisibleLines);
+                    is_rendered = false;
+                }
+            }
+        }
+        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
+        {
+            if (key_repeat_check(is_repeat, next_fire_ts, now))
+            {
+                if (_scrollPosition < _totalLines - maxVisibleLines)
+                {
+                    _scrollPosition = std::min(_totalLines - maxVisibleLines, _scrollPosition + maxVisibleLines);
+                    is_rendered = false;
+                }
+            }
+        }
+        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_ESC) || _hal->keyboard()->isKeyPressing(KEY_NUM_BACKSPACE))
+        {
+            _hal->keyboard()->waitForRelease(KEY_NUM_ESC);
+            _hal->playNextSound();
+            stopS2S();
+            setState(APP_STATE_IDLE);
+            _partialPrompt = "";
+            _currentScreen = SCREEN_START;
+            is_rendered = false;
+        }
+        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_ENTER))
+        {
+            _hal->keyboard()->waitForRelease(KEY_NUM_ENTER);
+            _hal->playNextSound();
+            is_rendered = false;
+
+            if (_appState == APP_STATE_S2S_LISTENING || _appState == APP_STATE_S2S_SPEAKING)
+            {
+                xEventGroupSetBits(_control_event_group, S2S_USER_INTERRUPT_BIT);
+            }
+            else if (!_s2s_active)
+            {
+                startS2S();
+            }
+        }
+    }
+    else
+    {
+        is_repeat = false;
+    }
+}
+
+void GeminiApp::updateScrollPosition() { _scrollPosition = _partialPrompt.empty() ? _lastHistoryIndex : (int)_chat.size(); }
+
+void GeminiApp::trimChat()
+{
+    if ((int)_chat.size() > MAX_CHAT_LINES)
+    {
+        int excess = _chat.size() - MAX_CHAT_LINES;
+        _chat.erase(_chat.begin(), _chat.begin() + excess);
+        _lastHistoryIndex = std::max(0, _lastHistoryIndex - excess);
+        _scrollPosition = std::max(0, _scrollPosition - excess);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Animation & state
+// ═══════════════════════════════════════════════════════════
 
 #if 1
 float linear(float t) { return t; }
@@ -788,11 +789,7 @@ float easeOutQuart(float t) { return 1.0f - powf(1.0f - t, 4.0f); }
 float easeInOutQuart(float t) { return t < 0.5 ? 8.0f * t * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 4.0f) / 2.0f; }
 float easeInQuint(float t) { return powf(t, 5.0f); }
 float easeOutQuint(float t) { return 1.0f - powf(1.0f - t, 5.0f); }
-float easeInOutQuint(float t)
-{
-    return t < 0.5 ? 16.0f * t * t * t * t * t
-                   : 1.0f - powf(-2.0f * t + 2.0f, 5.0f) / 2.0f; /*t<.5f ? 16.0f*powf(t,5) : 1.0f+16.0f*(--t)*powf(t,4);*/
-}
+float easeInOutQuint(float t) { return t < 0.5 ? 16.0f * t * t * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 5.0f) / 2.0f; }
 float easeInSine(float t) { return 1.0f - cosf((t * M_PI) / 2.0f); }
 float easeOutSine(float t) { return sinf((t * M_PI) / 2.0f); }
 float easeInOutSine(float t) { return -(cosf(M_PI * t) - 1.0f) / 2.0f; }
@@ -818,12 +815,11 @@ void GeminiApp::setState(AppState state)
 {
     if (_appState == state)
         return;
-    ESP_LOGI(TAG, "Setting app state to %d, heap=%lu", state, (unsigned long)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "State -> %d, heap=%lu", state, (unsigned long)esp_get_free_heap_size());
     _appState = state;
     _anim_context.timer_start = millis();
 }
 
-// Draw the animation
 bool GeminiApp::drawAnimation(bool need_update)
 {
     switch (_appState)
@@ -834,53 +830,46 @@ bool GeminiApp::drawAnimation(bool need_update)
     case APP_STATE_DISCONNECTED:
         _sprite->pushImage(0, 0, 50, 50, image_data_disconnected);
         break;
-    case APP_STATE_STREAM_ERROR:
+    case APP_STATE_S2S_ERROR:
         _sprite->pushImage(0, 0, 50, 50, image_data_conn_error);
         break;
     case APP_STATE_CONNECTING_WIFI:
         _sprite->pushImage(0, 0, 50, 50, image_data_connecting_wifi);
         break;
-    case APP_STATE_CONNECTING_TTS:
-    case APP_STATE_CONNECTING_STT:
-    case APP_STATE_CONNECTING_GEMINI:
+    case APP_STATE_S2S_CONNECTING:
         _sprite->pushImage(0, 0, 50, 50, image_data_connecting_internet);
         break;
-    case APP_STATE_TTS_PLAYING:
+    case APP_STATE_S2S_SPEAKING:
         _sprite->pushImage(0, 0, 50, 50, image_data_playing3);
         break;
-    case APP_STATE_LISTENING_MIC:
+    case APP_STATE_S2S_LISTENING:
         _sprite->pushImage(0, 0, 50, 50, image_data_mic);
         break;
     }
+
     uint32_t timer_now = millis();
-    // int x_offset = (_hal->canvas()->width() - _sprite->width()) / 2;
-    // int y_offset = (_hal->canvas()->height() - _sprite->height()) / 2;
     int x_offset = _hal->canvas()->width() - _sprite->width() - 1;
     int y_offset = 0;
 
     uint32_t full_pos = (timer_now - _anim_context.timer_start) % (_anim_context.duration * 2);
     uint32_t timer_pos = (full_pos % _anim_context.duration) * _anim_context.steps / _anim_context.duration;
-    // make reverse move when > duration
     float ifloat;
     if (full_pos >= _anim_context.duration)
-    {
         ifloat = easeOutExpo(float(_anim_context.steps - timer_pos) / float(_anim_context.steps));
-    }
     else
-    {
         ifloat = easeOutExpo(float(timer_pos) / float(_anim_context.steps));
-    }
+
     uint8_t alpha = ifloat * 255;
     if (alpha == _anim_context.last_alpha && need_update == false)
         return false;
     _anim_context.last_alpha = alpha;
-    // mixing sprite with background according to alpha
+
     for (int py = 0; py < _sprite->height(); py++)
     {
         for (int px = 0; px < _sprite->width(); px++)
         {
-            uint16_t fg = _sprite->readPixel(px, py);                              // foreground (sprite pixel)
-            uint16_t bg = _hal->canvas()->readPixel(px + x_offset, py + y_offset); // background pixel
+            uint16_t fg = _sprite->readPixel(px, py);
+            uint16_t bg = _hal->canvas()->readPixel(px + x_offset, py + y_offset);
 
             uint32_t fg24 = _sprite->color16to24(fg);
             uint8_t fg_r = (fg24 >> 16) & 0xFF;
@@ -895,7 +884,7 @@ bool GeminiApp::drawAnimation(bool need_update)
             uint8_t r = (fg_r * alpha + bg_r * (255 - alpha)) / 255;
             uint8_t g = (fg_g * alpha + bg_g * (255 - alpha)) / 255;
             uint8_t b = (fg_b * alpha + bg_b * (255 - alpha)) / 255;
-            // transparent color
+
             if (fg == THEME_COLOR_BG)
                 _sprite->drawPixel(px, py, _sprite->color888(bg_r, bg_g, bg_b));
             else
@@ -905,400 +894,4 @@ bool GeminiApp::drawAnimation(bool need_update)
     _sprite->pushSprite(x_offset, y_offset);
     is_rendered = false;
     return true;
-}
-
-// Draw the response screen
-bool GeminiApp::drawResponseScreen()
-{
-    if (is_rendered)
-        return false;
-    int scrollbar_width = 5;
-    // Clear the screen
-    _hal->canvas()->fillScreen(THEME_COLOR_BG);
-    _hal->canvas()->setFont(FONT_14);
-
-    // Draw response text with scrolling
-    int textStartY = TEXT_PADDING;
-    int textHeight = _hal->canvas()->height() - textStartY - HINT_HEIGHT; // Leave space for bottom hint
-
-    if (_chat.empty() && _partialPrompt.empty())
-    {
-        _hal->canvas()->setTextColor(TFT_DARKGRAY);
-        _hal->canvas()->drawCenterString("no chat history", _hal->canvas()->width() / 2, _hal->canvas()->height() / 2, FONT_16);
-    }
-    else
-    {
-        // Calculate line height and maximum visible lines
-        int lineHeight = _hal->canvas()->fontHeight(FONT_14);
-        int maxVisibleLines = textHeight / lineHeight;
-        // store for control handler
-        std::vector<std::string> partial_prompt = splitTextIntoLines(_partialPrompt);
-        _totalLines = _chat.size() + partial_prompt.size();
-
-        // Adjust scroll position if needed
-        if (_scrollPosition > _totalLines - maxVisibleLines)
-        {
-            _scrollPosition = std::max(0, _totalLines - maxVisibleLines);
-        }
-
-        // Display visible lines
-        for (int i = 0; i < maxVisibleLines && i + _scrollPosition < _totalLines; i++)
-        {
-            int y = textStartY + (i * lineHeight);
-            int current_line_index = i + _scrollPosition;
-
-            // Determine if the current line is part of a request or response
-            bool is_request =
-                (current_line_index < _chat.size() && _chat[current_line_index].first == HISTORY_ITEM_TYPE_USER) ||
-                (current_line_index >= _chat.size());
-            bool is_last = current_line_index >= _lastHistoryIndex;
-            // Use different color/style for request vs response
-            if (is_request)
-            {
-                _hal->canvas()->fillRect(0,
-                                         y,
-                                         TEXT_PADDING - 1,
-                                         lineHeight,
-                                         is_last ? TFT_WHITE : TFT_DARKGRAY);                          // Bar color for request
-                _hal->canvas()->setTextColor(is_last ? THEME_COLOR_TITLE : THEME_COLOR_TITLE_HISTORY); // Text color for request
-            }
-            else
-            {
-                _hal->canvas()->fillRect(0,
-                                         y,
-                                         TEXT_PADDING - 1,
-                                         lineHeight,
-                                         is_last ? THEME_COLOR_TITLE : THEME_COLOR_TITLE_HISTORY); // Bar color for response
-                _hal->canvas()->setTextColor(is_last ? TFT_WHITE : TFT_DARKGRAY);                  // Text color for response
-            }
-
-            _hal->canvas()->drawString(current_line_index >= _chat.size()
-                                           ? partial_prompt[current_line_index - _chat.size()].c_str()
-                                           : _chat[current_line_index].second.c_str(),
-                                       TEXT_PADDING,
-                                       y);
-        }
-
-        int scrollbar_height = lineHeight * maxVisibleLines;
-
-        // Draw scroll indicators if needed
-        if (_totalLines > maxVisibleLines)
-        {
-            int scrollbar_x = _hal->canvas()->width() - scrollbar_width - 1;
-            _hal->canvas()->drawRect(scrollbar_x, textStartY, scrollbar_width, scrollbar_height, TFT_DARKGREY);
-            int thumb_height = scrollbar_height * maxVisibleLines / _totalLines;
-            int thumb_pos = textStartY + (scrollbar_height - thumb_height) * _scrollPosition / (_totalLines - maxVisibleLines);
-            _hal->canvas()->fillRect(scrollbar_x, thumb_pos, scrollbar_width, thumb_height, TFT_ORANGE);
-        }
-    }
-    // Update the display
-    is_rendered = true;
-    return true;
-}
-
-// Handle input on the response screen
-void GeminiApp::handleResponseScreenInput()
-{
-    // Calculate maximum scroll position
-    int lineHeight = _hal->canvas()->fontHeight(FONT_14);
-    int textHeight = _hal->canvas()->height() - 14;
-    int maxVisibleLines = textHeight / lineHeight;
-    _hal->keyboard()->updateKeyList();
-    _hal->keyboard()->updateKeysState();
-
-    if (_hal->keyboard()->isPressed())
-    {
-        if (_hal->keyboard()->isKeyPressing(KEY_NUM_UP))
-        {
-            if (!is_repeat || !_hal->keyboard()->waitForRelease(KEY_NUM_UP, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-            {
-                is_start = !is_repeat;
-                is_repeat = true;
-                _hal->playNextSound();
-
-                // Scroll up
-                if (_scrollPosition > 0)
-                {
-                    _scrollPosition--;
-                    is_rendered = false;
-                }
-            }
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_DOWN))
-        {
-            if (!is_repeat || !_hal->keyboard()->waitForRelease(KEY_NUM_DOWN, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-            {
-                is_start = !is_repeat;
-                is_repeat = true;
-                _hal->playNextSound();
-
-                // Scroll down if not at bottom
-                if (_scrollPosition < _totalLines - maxVisibleLines)
-                {
-                    _scrollPosition++;
-                    is_rendered = false;
-                }
-            }
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
-        {
-            if (!is_repeat || !_hal->keyboard()->waitForRelease(KEY_NUM_LEFT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-            {
-                is_start = !is_repeat;
-                is_repeat = true;
-                _hal->playNextSound();
-
-                // Jump up by visible_items count (page up)
-                int jump = maxVisibleLines;
-                if (_scrollPosition > 0)
-                {
-                    _scrollPosition = std::max(0, _scrollPosition - jump);
-                    is_rendered = false;
-                }
-            }
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
-        {
-            if (!is_repeat || !_hal->keyboard()->waitForRelease(KEY_NUM_RIGHT, is_start ? KEY_HOLD_MS : KEY_REPEAT_MS))
-            {
-                is_start = !is_repeat;
-                is_repeat = true;
-                _hal->playNextSound();
-
-                // Jump down by visible_items count (page down)
-                int jump = maxVisibleLines;
-                if (_scrollPosition < _totalLines - maxVisibleLines)
-                {
-                    _scrollPosition = std::min(_totalLines - maxVisibleLines, _scrollPosition + jump);
-                    is_rendered = false;
-                }
-            }
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_ESC))
-        {
-            _hal->keyboard()->waitForRelease(KEY_NUM_ESC);
-            _hal->playNextSound();
-
-            setState(APP_STATE_IDLE);
-            stopTTS();
-            _partialPrompt = "";
-            deepgram_streaming_stop();
-            _currentScreen = SCREEN_START;
-            is_rendered = false;
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_BACKSPACE))
-        {
-            _hal->keyboard()->waitForRelease(KEY_NUM_ESC);
-            _hal->playNextSound();
-
-            setState(APP_STATE_IDLE);
-            stopTTS();
-            _partialPrompt = "";
-            deepgram_streaming_stop();
-            _currentScreen = SCREEN_START;
-            is_rendered = false;
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_ENTER))
-        {
-            _hal->keyboard()->waitForRelease(KEY_NUM_ENTER);
-            _hal->playNextSound();
-            stopTTS();
-            // need to redraw after dialog anyway
-            is_rendered = false;
-            _partialPrompt = "";
-            // hold Fn to enter first prompt
-            if (_hal->settings()->getBool("deepgram", "enabled") && !_hal->keyboard()->keysState().fn)
-            {
-                _currentScreen = SCREEN_CHAT;
-            }
-            else
-            {
-                deepgram_streaming_stop();
-                // hold Fn to keep prompt
-                if (!_hal->keyboard()->keysState().fn)
-                    _userPrompt = "";
-                // Show the input dialog to get user's prompt
-                bool result = UTILS::UI::show_edit_string_dialog(_hal, "Enter your prompt", _userPrompt, false, 1000);
-
-                if (result && !_userPrompt.empty())
-                {
-                    setState(APP_STATE_CONNECTING_GEMINI);
-                    xEventGroupClearBits(_control_event_group, STT_TRANSCRIPT_BIT);
-                    // Call the API asynchronously to start the task
-                    _history.push_back({_userPrompt, "..."});
-                    callGeminiAPI();
-                    _currentScreen = SCREEN_CHAT;
-                }
-            }
-        }
-    }
-    else
-        is_repeat = false;
-}
-
-// Call Gemini API with proper error handling
-void GeminiApp::callGeminiAPI()
-{
-    // Clear any previous bits
-    xEventGroupClearBits(_control_event_group, GEMINI_TASK_STARTED_BIT | GEMINI_TASK_STOPPED_BIT);
-
-    // Create the Gemini API task
-    BaseType_t result = xTaskCreate(gemini_task,
-                                    "gemini_task",
-                                    TTS_TASK_STACK_SIZE, // Reuse the TTS stack size since they're similar tasks
-                                    this,
-                                    TTS_TASK_PRIORITY,     // Similar priority to TTS
-                                    &_gemini_task_handle); // Same core as TTS
-
-    if (result != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to create Gemini API task");
-        _gemini_task_handle = nullptr;
-    }
-}
-
-// Gemini API task handler function
-void GeminiApp::gemini_task(void* parameter)
-{
-    GeminiApp* app = static_cast<GeminiApp*>(parameter);
-    HAL::Hal* hal = app->_hal;
-    EventGroupHandle_t control_event_group = app->_control_event_group;
-    std::string prompt = app->_userPrompt;
-
-    // Set the started bit
-    xEventGroupSetBits(control_event_group, GEMINI_TASK_STARTED_BIT);
-
-    ESP_LOGD(TAG, "Gemini API task started");
-
-    // Get the API settings from the HAL settings
-    std::string model = hal->settings()->getString(GEMINI_NS, "model");
-    std::string api_key = hal->settings()->getString(GEMINI_NS, "api_key");
-    std::string rules = hal->settings()->getString(GEMINI_NS, "rules");
-
-    // Call the Google API with the history and prompt
-    std::string response = call_google_api(model, api_key, rules, app->_history, prompt);
-
-    // Store the response in the class
-    app->_apiResponse = response;
-
-    // Signal task completion by setting the stopped bit
-    xEventGroupSetBits(control_event_group, GEMINI_TASK_STOPPED_BIT);
-
-    ESP_LOGD(TAG, "Gemini API task completed");
-
-    // Task deletes itself
-    vTaskDelete(NULL);
-}
-
-// Method to get the response from the API task
-std::string GeminiApp::get_response()
-{
-    // Wait for the API task to complete with a timeout
-    EventBits_t bits = xEventGroupWaitBits(_control_event_group,
-                                           GEMINI_TASK_STOPPED_BIT,
-                                           pdFALSE,               // Don't clear the bits
-                                           pdTRUE,                // Wait for all bits
-                                           pdMS_TO_TICKS(30000)); // 30-second timeout (API calls can take time)
-
-    // Check if we got a valid response
-    if ((bits & GEMINI_TASK_STOPPED_BIT) != GEMINI_TASK_STOPPED_BIT)
-    {
-        ESP_LOGE(TAG, "Timeout waiting for Gemini API response");
-        return "Error: API request timed out";
-    }
-
-    // Clear the bits for next use
-    xEventGroupClearBits(_control_event_group, GEMINI_TASK_STARTED_BIT | GEMINI_TASK_STOPPED_BIT);
-
-    return _apiResponse;
-}
-
-// Draw the Gemini QR code screen
-bool GeminiApp::drawGeminiQRScreen()
-{
-    if (is_rendered)
-        return false;
-
-    // Clear the screen
-    _hal->canvas()->fillScreen(THEME_COLOR_BG);
-    _hal->canvas()->pushImage(0, 0, 135, 135, image_data_qr_gemini);
-    _hal->canvas()->setFont(FONT_16);
-    _hal->canvas()->setTextColor(THEME_COLOR_TITLE);
-    int center_x = _hal->canvas()->height() + (_hal->canvas()->width() - _hal->canvas()->height()) / 2;
-    _hal->canvas()->drawCenterString("Gemini", center_x, _hal->canvas()->height() / 2 - _hal->canvas()->fontWidth());
-    _hal->canvas()->setTextColor(TFT_LIGHTGREY);
-    _hal->canvas()->drawCenterString("Get API key", center_x, _hal->canvas()->height() / 2 + _hal->canvas()->fontWidth());
-
-    is_rendered = true;
-    return true;
-}
-
-// Draw the ElevenLabs QR code screen
-bool GeminiApp::drawElevenLabsQRScreen()
-{
-    if (is_rendered)
-        return false;
-
-    // Clear the screen
-    _hal->canvas()->fillScreen(THEME_COLOR_BG);
-    _hal->canvas()->pushImage(0, 0, 135, 135, image_data_qr_elevenlabs);
-    _hal->canvas()->setFont(FONT_16);
-    _hal->canvas()->setTextColor(TFT_ORANGE);
-    int center_x = _hal->canvas()->height() + (_hal->canvas()->width() - _hal->canvas()->height()) / 2;
-    _hal->canvas()->drawCenterString("ElevenLabs", center_x, _hal->canvas()->height() / 2 - _hal->canvas()->fontWidth());
-    _hal->canvas()->setTextColor(TFT_LIGHTGREY);
-    _hal->canvas()->drawCenterString("Get API key", center_x, _hal->canvas()->height() / 2 + _hal->canvas()->fontWidth());
-    is_rendered = true;
-    return true;
-}
-
-// Draw the Deepgram QR code screen
-bool GeminiApp::drawDeepgramQRScreen()
-{
-    if (is_rendered)
-        return false;
-
-    // Clear the screen
-    _hal->canvas()->fillScreen(THEME_COLOR_BG);
-    _hal->canvas()->pushImage(0, 0, 135, 135, image_data_qr_deepgram);
-    _hal->canvas()->setFont(FONT_16);
-    _hal->canvas()->setTextColor(TFT_VIOLET);
-    int center_x = _hal->canvas()->height() + (_hal->canvas()->width() - _hal->canvas()->height()) / 2;
-    _hal->canvas()->drawCenterString("Deepgram", center_x, _hal->canvas()->height() / 2 - _hal->canvas()->fontWidth());
-    _hal->canvas()->setTextColor(TFT_LIGHTGREY);
-    _hal->canvas()->drawCenterString("Get API key", center_x, _hal->canvas()->height() / 2 + _hal->canvas()->fontWidth());
-    is_rendered = true;
-    return true;
-}
-
-// Handle input on the API key screen
-void GeminiApp::handleApiKeyScreenInput()
-{
-    _hal->keyboard()->updateKeyList();
-    _hal->keyboard()->updateKeysState();
-    if (_hal->keyboard()->isPressed())
-    {
-        if (_hal->keyboard()->isKeyPressing(KEY_NUM_ESC))
-        {
-            _hal->keyboard()->waitForRelease(KEY_NUM_ESC);
-            _hal->playNextSound();
-
-            _currentScreen = SCREEN_SETTINGS;
-            is_rendered = false;
-        }
-        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_ENTER))
-        {
-            _hal->keyboard()->waitForRelease(KEY_NUM_ENTER);
-            _hal->playNextSound();
-
-            _currentScreen = SCREEN_SETTINGS;
-            is_rendered = false;
-        }
-    }
-}
-
-void GeminiApp::updateScrollPosition()
-{
-    // no partial responce - show last request item
-    _scrollPosition = _partialPrompt.empty() ? _lastHistoryIndex : _chat.size();
 }
