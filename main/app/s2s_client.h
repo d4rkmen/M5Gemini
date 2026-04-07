@@ -20,6 +20,7 @@
 #define S2S_INPUT_TRANSCRIPT_BIT  (1 << 10)
 #define S2S_OUTPUT_TRANSCRIPT_BIT (1 << 11)
 #define S2S_USER_INTERRUPT_BIT    (1 << 12)
+#define S2S_FATAL_ERROR_BIT       (1 << 13)
 
 #define S2S_MIC_SAMPLE_RATE  16000
 #define S2S_SPK_SAMPLE_RATE  24000
@@ -30,6 +31,7 @@ struct S2SSharedData
     std::string input_transcript;
     std::string output_transcript;
     std::string session_handle;
+    std::string error_message;
 };
 
 bool s2s_start(HAL::Hal* hal, EventGroupHandle_t event_group, S2SSharedData* shared,

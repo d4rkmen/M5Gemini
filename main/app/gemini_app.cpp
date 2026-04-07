@@ -113,10 +113,12 @@ void GeminiApp::startS2S()
         return;
     }
 
+    xEventGroupClearBits(_control_event_group, S2S_FATAL_ERROR_BIT | S2S_ERROR_BIT);
     if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(200)) == pdTRUE)
     {
         _s2s_shared.input_transcript.clear();
         _s2s_shared.output_transcript.clear();
+        _s2s_shared.error_message.clear();
         xSemaphoreGive(_s2s_shared.mutex);
     }
 
@@ -399,11 +401,30 @@ void GeminiApp::update()
         case APP_STATE_S2S_ERROR:
             if (bits & S2S_TASK_STOPPED_BIT)
             {
-                ESP_LOGW(TAG, "S2S session ended, attempting reconnect");
-                stopS2S();
-                vTaskDelay(pdMS_TO_TICKS(2000));
-                startS2S();
-                is_rendered = false;
+                if (bits & S2S_FATAL_ERROR_BIT)
+                {
+                    std::string err_msg;
+                    if (xSemaphoreTake(_s2s_shared.mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+                    {
+                        err_msg = _s2s_shared.error_message;
+                        _s2s_shared.error_message.clear();
+                        xSemaphoreGive(_s2s_shared.mutex);
+                    }
+                    xEventGroupClearBits(_control_event_group, S2S_FATAL_ERROR_BIT | S2S_ERROR_BIT);
+                    stopS2S();
+                    UTILS::UI::show_error_dialog(_hal, "Error", err_msg.empty() ? "Session failed" : err_msg);
+                    _currentScreen = SCREEN_START;
+                    setState(APP_STATE_IDLE);
+                    is_rendered = false;
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "S2S session ended, attempting reconnect");
+                    stopS2S();
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    startS2S();
+                    is_rendered = false;
+                }
             }
             break;
         }

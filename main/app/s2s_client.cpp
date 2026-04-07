@@ -72,6 +72,16 @@ static void s2s_process_message(s2s_context_t* ctx);
 static bool s2s_send_setup(s2s_context_t* ctx);
 static void s2s_client_task(void* parameter);
 
+static void set_fatal_error(s2s_context_t* ctx, const char* msg)
+{
+    if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        ctx->shared->error_message = msg ? msg : "Unknown error";
+        xSemaphoreGive(ctx->shared->mutex);
+    }
+    xEventGroupSetBits(ctx->event_group, S2S_FATAL_ERROR_BIT | S2S_ERROR_BIT);
+}
+
 // ═══════════════════════════════════════════════════════════
 // WebSocket event handler (runs in the ESP WS client task)
 // ═══════════════════════════════════════════════════════════
@@ -117,17 +127,30 @@ static void s2s_ws_event_handler(void* handler_args, esp_event_base_t base, int3
             int code = data->data_len >= 2
                            ? ((uint8_t)data->data_ptr[0] << 8 | (uint8_t)data->data_ptr[1])
                            : -1;
+            char reason[201] = {0};
+            int reason_len = 0;
             if (data->data_len > 2)
             {
-                int reason_len = data->data_len - 2;
+                reason_len = data->data_len - 2;
                 if (reason_len > 200) reason_len = 200;
-                ESP_LOGE(TAG, "WS CLOSE code=%d reason=%.*s", code, reason_len, data->data_ptr + 2);
+                memcpy(reason, data->data_ptr + 2, reason_len);
+                reason[reason_len] = '\0';
+                ESP_LOGE(TAG, "WS CLOSE code=%d reason=%s", code, reason);
             }
             else
             {
                 ESP_LOGE(TAG, "WS CLOSE code=%d", code);
             }
-            xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
+
+            bool fatal = (code == 1008 || code == 1003);
+            if (fatal)
+            {
+                set_fatal_error(ctx, reason_len > 0 ? reason : "Connection rejected by server");
+            }
+            else
+            {
+                xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
+            }
         }
         else if (data->op_code != 0x09 && data->op_code != 0x0a)
         {
@@ -374,7 +397,12 @@ static void s2s_process_message(s2s_context_t* ctx)
         mjson_get_number(buf, len, "$.error.code", &code);
         n = mjson_get_string(buf, len, "$.error.message", txt_buf, sizeof(txt_buf));
         ESP_LOGE(TAG, "API error: code=%d msg=%s", (int)code, n > 0 ? txt_buf : "unknown");
-        xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
+        int ic = (int)code;
+        bool fatal = (ic == 400 || ic == 401 || ic == 403 || ic == 404);
+        if (fatal)
+            set_fatal_error(ctx, n > 0 ? txt_buf : "API request rejected");
+        else
+            xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
         return;
     }
 
@@ -505,12 +533,15 @@ static void s2s_client_task(void* parameter)
 
     // ── Wait for setupComplete ──
     bits = xEventGroupWaitBits(ctx->event_group,
-                               S2S_SETUP_COMPLETE_BIT | S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT,
+                               S2S_SETUP_COMPLETE_BIT | S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT,
                                pdFALSE, pdFALSE, pdMS_TO_TICKS(15000));
     if (!(bits & S2S_SETUP_COMPLETE_BIT))
     {
-        ESP_LOGE(TAG, "Setup timeout");
-        xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
+        if (!(bits & S2S_FATAL_ERROR_BIT))
+        {
+            ESP_LOGE(TAG, "Setup timeout");
+            xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
+        }
         goto exit;
     }
 
