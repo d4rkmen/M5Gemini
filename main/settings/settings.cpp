@@ -77,82 +77,30 @@ namespace SETTINGS
             {"model",
              "Model name",
              TYPE_STRING,
-             "gemini-flash-latest",
+             "gemini-2.0-flash-live-001",
              "",
-             "gemini-3.1-pro-preview;gemini-3-flash-preview;gemini-3.1-flash-lite-preview;gemini-2.5-pro;gemini-2.5-flash;"
-             "gemini-2.5-flash-lite;gemini-pro-latest;gemini-flash-latest",
+             "gemini-3.1-flash-live-preview;gemini-2.5-flash-native-audio-preview-12-2025",
              "",
-             "Model name to use for Gemini. Hold [Fn] to enter custom"},
+             "Model name. Live models for S2S voice mode. Hold [Fn] to enter custom"},
+            {"voice",
+             "Voice",
+             TYPE_STRING,
+             "Kore",
+             "",
+             "Kore;Puck;Charon;Fenrir;Aoede;Leda;Orus;Vesta;Zephyr",
+             "",
+             "Voice for speech-to-speech mode. Hold [Fn] to enter custom"},
+            {"volume", "S2S Volume", TYPE_NUMBER, "255", "255", "0", "255", "Speech volume for S2S mode (0-255)"},
             {"rules",
              "Rules",
              TYPE_STRING,
-             "you are conversational AI assistant with STT and TTS features running on M5 Cardputer the ESP32-S3 device. your "
-             "name is Cardputer. always answer using ASCII characters only. limit your response to 800 tokens. give short "
-             "direct and a quite funny answer to the question. start your answer with something like: 'yes, master', 'your "
-             "wish is my command' and so on",
+             "you are conversational AI assistant running on M5 CardPuter."
+             "give short direct and a quite funny answer. start your answer with something "
+             "like: 'yes, master', 'your wish is my command' and so on. reply in user language if possible",
              "",
              "",
-             "",
-             "Rules to use for prompt"},
-        };
-
-        SettingGroup_t elevenlabs_group;
-        elevenlabs_group.name = "ElevenLabs settings";
-        elevenlabs_group.nvs_namespace = "elevenlabs";
-        elevenlabs_group.items = {
-            back_item,
-            {"enabled", "Enabled", TYPE_BOOL, "true", "true", "", "", "Enable ElevenLabs text-to-speech"},
-            {"volume", "Volume", TYPE_NUMBER, "255", "255", "0", "255", "Speech volume level (0-255)"},
-            {"api_key", "API Key", TYPE_STRING, "", "", "", "", "Your ElevenLabs API key"},
-            {"voice",
-             "Voice ID",
-             TYPE_STRING,
-             "bIHbv24MWmeRgasZH58o",
-             "",
-             "bIHbv24MWmeRgasZH58o",
-             "",
-             "Single Voice ID available for free tier. Hold [Fn] to enter custom"},
-            {"model",
-             "Model name",
-             TYPE_STRING,
-             "eleven_multilingual_v2",
-             "",
-             "eleven_v3;eleven_multilingual_v2;eleven_flash_v2_5;eleven_flash_v2;scribe_v2",
-             "",
-             "The TTS model to use. Hold [Fn] to enter custom"},
-        };
-
-        SettingGroup_t deepgram_group;
-        deepgram_group.name = "Deepgram settings";
-        deepgram_group.nvs_namespace = "deepgram";
-        deepgram_group.items = {
-            back_item,
-            {"enabled", "Enabled", TYPE_BOOL, "true", "true", "", "", "Enable Deepgram speech-to-text"},
-            {"sensetivity", "Sensetivity", TYPE_NUMBER, "2", "2", "1", "16", "Mic sensitivity factor (1-16)"},
-            {"api_key", "API Key", TYPE_STRING, "", "", "", "", "Your Deepgram API key"},
-            {"smart_format",
-             "Smart format",
-             TYPE_BOOL,
-             "true",
-             "true",
-             "",
-             "",
-             "Enable smart text formatting (punctuation, capitalization, etc.)"},
-            {"endpointing",
-             "Endpointing",
-             TYPE_NUMBER,
-             "600",
-             "600",
-             "200",
-             "3000",
-             "End of speech silence time in ms (200-3000)"},
-            {"model",
-             "Model name",
-             TYPE_STRING,
-             "nova-3",
-             "",
-             "nova-3;nova-2;nova;enhanced;base",
-             "The STT model to use. Hold [Fn] to enter custom (nova-2-phonecall etc.)"},
+             "500",
+             "System instructions for the model"},
         };
 
         SettingGroup_t export_group;
@@ -212,7 +160,7 @@ namespace SETTINGS
             }
         };
 
-        _metadata = {wifi_group, sys_group, gemini_group, elevenlabs_group, deepgram_group, export_group, import_group};
+        _metadata = {wifi_group, sys_group, gemini_group, export_group, import_group};
     }
 
     void Settings::setHal(HAL::Hal* hal) { _hal = hal; }
