@@ -77,10 +77,10 @@ namespace SETTINGS
             {"model",
              "Model name",
              TYPE_STRING,
-             "gemini-2.0-flash-live-001",
+             "gemini-3.1-flash-live-preview",
              "",
              "gemini-3.1-flash-live-preview;gemini-2.5-flash-native-audio-preview-12-2025",
-             "",
+             "100",
              "Model name. Live models for S2S voice mode. Hold [Fn] to enter custom"},
             {"voice",
              "Voice",
@@ -96,7 +96,7 @@ namespace SETTINGS
              TYPE_STRING,
              "you are conversational AI assistant running on M5 CardPuter."
              "give short direct and a quite funny answer. start your answer with something "
-             "like: 'yes, master', 'your wish is my command' and so on. reply in user language if possible",
+             "like: 'yes, master', 'your wish is my command' and so on. reply in user's language",
              "",
              "",
              "500",
