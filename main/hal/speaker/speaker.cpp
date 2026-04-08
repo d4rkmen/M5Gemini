@@ -57,7 +57,7 @@ namespace HAL
 
         // Create speaker task (no semaphore needed, we use task notifications)
         BaseType_t result;
-        if (_cfg.task_pinned_core < 2)
+        if (_cfg.task_pinned_core < portNUM_PROCESSORS)
         {
             result = xTaskCreatePinnedToCore(spk_task,
                                              "speaker_i2s",
@@ -98,15 +98,11 @@ namespace HAL
         if (_task_handle)
         {
             xTaskNotifyGive(_task_handle);
-            if (_task_semaphore)
-            {
-                ESP_LOGD(TAG, "end() waiting for spk_task semaphore...");
-                BaseType_t got = xSemaphoreTake(_task_semaphore, pdMS_TO_TICKS(2000));
-                if (got != pdTRUE)
-                {
-                    ESP_LOGW(TAG, "end() semaphore TIMEOUT — spk_task may be stuck");
-                }
-            }
+            int retries = 200;
+            while (retries-- > 0 && eTaskGetState(_task_handle) != eSuspended)
+                vTaskDelay(pdMS_TO_TICKS(10));
+            if (retries <= 0)
+                ESP_LOGW(TAG, "end() TIMEOUT — spk_task may be stuck");
             vTaskDelete(_task_handle);
             _task_handle = nullptr;
         }
@@ -791,8 +787,6 @@ namespace HAL
                 break;
             }
         }
-
-        i2s_channel_disable(self->_tx_chan);
 
         delete[] self->mix_buf;
         if (self->_task_semaphore)
