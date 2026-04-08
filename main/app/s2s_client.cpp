@@ -8,6 +8,7 @@
 #include "hal_cardputer.h"
 #include <cmath>
 #include <cstring>
+#include "esp_rom_crc.h"
 #include <format>
 
 static const char* TAG = "S2S";
@@ -15,32 +16,32 @@ static const char* TAG = "S2S";
 #define S2S_WS_BASE_URL                                                                                                        \
     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
-#define MIC_BUF_SAMPLES  256
-#define MIC_REC_BLOCKS   3
-#define PCM_SEND_BYTES   3200   // 100ms at 16kHz 16-bit mono
-#define PLAY_CHUNK_SIZE  512
+#define MIC_BUF_SAMPLES 256
+#define MIC_REC_BLOCKS 3
+#define PCM_SEND_BYTES 3200 // 100ms at 16kHz 16-bit mono
+#define PLAY_CHUNK_SIZE 1024
 
-#define WS_BUFFER_SIZE   4096
-#define MSG_BUF_CAPACITY (1024 * 12)
+#define WS_BUFFER_SIZE 4096
+#define MSG_BUF_CAPACITY (1024 * 28)
 
 // JSON template for audio send — prefix/suffix are fixed, base64 payload goes in between
 static const char JSON_AUDIO_PREFIX[] = "{\"realtimeInput\":{\"audio\":{\"data\":\"";
 static const char JSON_AUDIO_SUFFIX[] = "\",\"mimeType\":\"audio/pcm;rate=16000\"}}}";
-static const char JSON_STREAM_END[]   = "{\"realtimeInput\":{\"audioStreamEnd\":true}}";
+static const char JSON_STREAM_END[] = "{\"realtimeInput\":{\"audioStreamEnd\":true}}";
 
 #define JSON_PREFIX_LEN (sizeof(JSON_AUDIO_PREFIX) - 1)
 #define JSON_SUFFIX_LEN (sizeof(JSON_AUDIO_SUFFIX) - 1)
-#define MAX_B64_LEN     ((PCM_SEND_BYTES * 4 / 3) + 4)
-#define JSON_BUF_SIZE   (JSON_PREFIX_LEN + MAX_B64_LEN + JSON_SUFFIX_LEN + 1)
+#define MAX_B64_LEN ((PCM_SEND_BYTES * 4 / 3) + 4)
+#define JSON_BUF_SIZE (JSON_PREFIX_LEN + MAX_B64_LEN + JSON_SUFFIX_LEN + 1)
 
-#define S2S_TASK_STACK_SIZE  (1024 * 8)
-#define S2S_TASK_PRIORITY    5
+#define S2S_TASK_STACK_SIZE (1024 * 8)
+#define S2S_TASK_PRIORITY 5
 
 // ─── Static buffers (BSS, not heap — avoids malloc fragmentation) ───
-static int16_t  s_rec_buf[MIC_REC_BLOCKS][MIC_BUF_SAMPLES];
-static uint8_t  s_pcm_buf[PCM_SEND_BYTES];
-static char     s_json_buf[JSON_BUF_SIZE];
-static char     s_msg_buf[MSG_BUF_CAPACITY];
+static int16_t s_rec_buf[MIC_REC_BLOCKS][MIC_BUF_SAMPLES];
+static uint8_t s_pcm_buf[PCM_SEND_BYTES];
+static char s_json_buf[JSON_BUF_SIZE];
+static char s_msg_buf[MSG_BUF_CAPACITY];
 
 // ─── Context ───
 typedef struct
@@ -57,6 +58,13 @@ typedef struct
     size_t msg_buf_len;
 
     TaskHandle_t task_handle;
+
+    volatile uint32_t payload_decoded;
+    volatile uint32_t rb_bytes_written;
+    volatile uint32_t rb_bytes_read;
+
+    uint32_t crc_received;
+    uint32_t crc_played;
 
     std::string model;
     std::string api_key;
@@ -89,7 +97,8 @@ static void s2s_ws_event_handler(void* handler_args, esp_event_base_t base, int3
 {
     esp_websocket_event_data_t* data = (esp_websocket_event_data_t*)event_data;
     s2s_context_t* ctx = (s2s_context_t*)handler_args;
-    if (!ctx) return;
+    if (!ctx)
+        return;
 
     switch (event_id)
     {
@@ -119,20 +128,20 @@ static void s2s_ws_event_handler(void* handler_args, esp_event_base_t base, int3
             if (data->payload_offset + data->data_len >= data->payload_len)
             {
                 ctx->msg_buf[ctx->msg_buf_len] = '\0';
+                ESP_LOGD(TAG, "WS msg: payload=%d buf=%d", (int)data->payload_len, (int)ctx->msg_buf_len);
                 s2s_process_message(ctx);
             }
         }
         else if (data->op_code == 0x08)
         {
-            int code = data->data_len >= 2
-                           ? ((uint8_t)data->data_ptr[0] << 8 | (uint8_t)data->data_ptr[1])
-                           : -1;
+            int code = data->data_len >= 2 ? ((uint8_t)data->data_ptr[0] << 8 | (uint8_t)data->data_ptr[1]) : -1;
             char reason[201] = {0};
             int reason_len = 0;
             if (data->data_len > 2)
             {
                 reason_len = data->data_len - 2;
-                if (reason_len > 200) reason_len = 200;
+                if (reason_len > 200)
+                    reason_len = 200;
                 memcpy(reason, data->data_ptr + 2, reason_len);
                 reason[reason_len] = '\0';
                 ESP_LOGE(TAG, "WS CLOSE code=%d reason=%s", code, reason);
@@ -142,13 +151,16 @@ static void s2s_ws_event_handler(void* handler_args, esp_event_base_t base, int3
                 ESP_LOGE(TAG, "WS CLOSE code=%d", code);
             }
 
-            bool fatal = (code == 1008 || code == 1003);
+            bool expired = (reason_len > 0 && strstr(reason, "expired") != nullptr);
+            bool fatal = !expired && (code == 1008 || code == 1003);
             if (fatal)
             {
                 set_fatal_error(ctx, reason_len > 0 ? reason : "Connection rejected by server");
             }
             else
             {
+                if (expired)
+                    ESP_LOGW(TAG, "Session expired, will reconnect");
                 xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
             }
         }
@@ -174,14 +186,15 @@ static void s2s_ws_event_handler(void* handler_args, esp_event_base_t base, int3
 // so decoding over the source buffer is safe.
 // ═══════════════════════════════════════════════════════════
 static const uint8_t b64_lut[256] = {
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64, 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,62,64,64,64,63, 52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
-    64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14, 15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,64,
-    64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40, 41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64, 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64, 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64, 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64, 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 62, 64, 64, 64, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    64, 64, 64, 64, 64, 64, 64, 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+    22, 23, 24, 25, 64, 64, 64, 64, 64, 64, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+    45, 46, 47, 48, 49, 50, 51, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
 };
 
 static size_t base64_decode_inplace(uint8_t* data, size_t len)
@@ -193,8 +206,8 @@ static size_t base64_decode_inplace(uint8_t* data, size_t len)
     size_t i = 0;
     while (i + 3 < len)
     {
-        uint32_t n = (b64_lut[data[i]] << 18) | (b64_lut[data[i + 1]] << 12) |
-                     (b64_lut[data[i + 2]] << 6) | b64_lut[data[i + 3]];
+        uint32_t n =
+            (b64_lut[data[i]] << 18) | (b64_lut[data[i + 1]] << 12) | (b64_lut[data[i + 2]] << 6) | b64_lut[data[i + 3]];
         *out++ = n >> 16;
         *out++ = (n >> 8) & 0xFF;
         *out++ = n & 0xFF;
@@ -217,71 +230,66 @@ static size_t base64_decode_inplace(uint8_t* data, size_t len)
 // Extract a JSON string value by key using raw string scan.
 // Returns pointer into buf and sets *len. No allocation.
 // ═══════════════════════════════════════════════════════════
-static const char* json_find_string(const char* buf, const char* key, size_t* out_len)
-{
-    const char* p = strstr(buf, key);
-    if (!p) return nullptr;
-    p += strlen(key);
-    while (*p == ' ' || *p == ':' || *p == ' ') p++;
-    if (*p != '"') return nullptr;
-    p++;
-    const char* end = p;
-    while (*end && *end != '"')
-    {
-        if (*end == '\\') { end++; if (*end) end++; }
-        else end++;
-    }
-    *out_len = end - p;
-    return p;
-}
-
-// ═══════════════════════════════════════════════════════════
 // Process a complete JSON message from the server
 // ═══════════════════════════════════════════════════════════
 static void s2s_process_message(s2s_context_t* ctx)
 {
-    char* buf = ctx->msg_buf;
+    const char* buf = ctx->msg_buf;
+    int len = ctx->msg_buf_len;
+    const char* tp;
+    int tl;
 
-    // ── Fast path 1: audio data (hottest path, zero allocation) ──
-    if (strstr(buf, "\"inlineData\""))
+    // ── Audio data (hottest path) ──
+    // Collect all part pointers BEFORE any in-place decode (decode corrupts buffer)
+    struct
     {
-        // Gemini 3.1+ may bundle transcription with audio in the same message.
-        // Extract transcript BEFORE in-place base64 decode corrupts the buffer.
+        char* b64;
+        size_t len;
+    } parts[8];
+    int part_count = 0;
+    {
+        char path[72];
+        for (int i = 0; i < 8; i++)
+        {
+            snprintf(path, sizeof(path), "$.serverContent.modelTurn.parts[%d].inlineData.data", i);
+            if (mjson_find(buf, len, path, &tp, &tl) != MJSON_TOK_STRING)
+                break;
+            parts[part_count].b64 = (char*)tp + 1;
+            parts[part_count].len = tl - 2;
+            part_count++;
+        }
+    }
+    if (part_count > 0)
+    {
+        // Extract bundled transcriptions BEFORE in-place base64 decode corrupts the buffer
         int txt_n = 0;
         bool is_output_txt = false;
         char txt_buf[256];
 
-        if (strstr(buf, "Transcription\""))
+        txt_n = mjson_get_string(buf, len, "$.serverContent.outputTranscription.text", txt_buf, sizeof(txt_buf));
+        if (txt_n > 0)
+            is_output_txt = true;
+        else
+            txt_n = mjson_get_string(buf, len, "$.serverContent.inputTranscription.text", txt_buf, sizeof(txt_buf));
+
+        // Decode and enqueue all audio parts
+        xEventGroupSetBits(ctx->event_group, S2S_MODEL_SPEAKING_BIT);
+        for (int i = 0; i < part_count; i++)
         {
-            txt_n = mjson_get_string(buf, ctx->msg_buf_len,
-                        "$.serverContent.outputTranscription.text",
-                        txt_buf, sizeof(txt_buf));
-            if (txt_n > 0)
+            size_t decoded_len = base64_decode_inplace((uint8_t*)parts[i].b64, parts[i].len);
+            ESP_LOGD(TAG, "Audio[%d/%d]: b64=%d decoded=%d", i, part_count, (int)parts[i].len, (int)decoded_len);
+            if (decoded_len > 0)
             {
-                is_output_txt = true;
-            }
-            else
-            {
-                txt_n = mjson_get_string(buf, ctx->msg_buf_len,
-                            "$.serverContent.inputTranscription.text",
-                            txt_buf, sizeof(txt_buf));
+                ctx->payload_decoded += decoded_len;
+                ctx->crc_received = esp_rom_crc32_le(ctx->crc_received, (const uint8_t*)parts[i].b64, decoded_len);
+                if (ctx->spk_ring_buffer)
+                {
+                    xRingbufferSend(ctx->spk_ring_buffer, parts[i].b64, decoded_len, portMAX_DELAY);
+                    ctx->rb_bytes_written += decoded_len;
+                }
             }
         }
 
-        // Decode audio in-place
-        size_t b64_len = 0;
-        const char* b64 = json_find_string(buf, "\"data\"", &b64_len);
-        if (b64 && b64_len > 0)
-        {
-            size_t decoded_len = base64_decode_inplace((uint8_t*)b64, b64_len);
-            if (decoded_len > 0 && ctx->spk_ring_buffer)
-            {
-                xRingbufferSend(ctx->spk_ring_buffer, b64, decoded_len, pdMS_TO_TICKS(2000));
-            }
-            xEventGroupSetBits(ctx->event_group, S2S_MODEL_SPEAKING_BIT);
-        }
-
-        // Forward any bundled transcript
         if (txt_n > 0)
         {
             if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(50)) == pdTRUE)
@@ -300,22 +308,23 @@ static void s2s_process_message(s2s_context_t* ctx)
                 }
             }
         }
-
         return;
     }
 
-    // ── Fast path 2: session resumption (very frequent, strstr only) ──
-    if (strstr(buf, "\"sessionResumptionUpdate\""))
+    // ── Session resumption (frequent) ──
+    if (mjson_find(buf, len, "$.sessionResumptionUpdate", &tp, &tl) != MJSON_TOK_INVALID)
     {
-        if (strstr(buf, "\"resumable\":true") || strstr(buf, "\"resumable\": true"))
+        int resumable = 0;
+        mjson_get_bool(buf, len, "$.sessionResumptionUpdate.resumable", &resumable);
+        if (resumable)
         {
-            size_t handle_len = 0;
-            const char* handle = json_find_string(buf, "\"newHandle\"", &handle_len);
-            if (handle && handle_len > 0 && handle_len < 128)
+            char handle[128];
+            int hn = mjson_get_string(buf, len, "$.sessionResumptionUpdate.newHandle", handle, sizeof(handle));
+            if (hn > 0)
             {
                 if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(20)) == pdTRUE)
                 {
-                    ctx->shared->session_handle.assign(handle, handle_len);
+                    ctx->shared->session_handle.assign(handle, hn);
                     xSemaphoreGive(ctx->shared->mutex);
                 }
             }
@@ -323,75 +332,67 @@ static void s2s_process_message(s2s_context_t* ctx)
         return;
     }
 
-    // ── Fast path 3: turnComplete / interrupted / generationComplete ──
-    if (strstr(buf, "\"turnComplete\""))
+    // ── Turn / interruption signals ──
+    if (mjson_find(buf, len, "$.serverContent.turnComplete", &tp, &tl) != MJSON_TOK_INVALID)
     {
         ESP_LOGI(TAG, "Turn complete");
         xEventGroupSetBits(ctx->event_group, S2S_TURN_COMPLETE_BIT);
         return;
     }
-    if (strstr(buf, "\"interrupted\""))
+    if (mjson_find(buf, len, "$.serverContent.interrupted", &tp, &tl) != MJSON_TOK_INVALID)
     {
         ESP_LOGW(TAG, "Model interrupted");
         xEventGroupSetBits(ctx->event_group, S2S_INTERRUPTED_BIT);
         return;
     }
-    if (strstr(buf, "\"generationComplete\""))
+    if (mjson_find(buf, len, "$.serverContent.generationComplete", &tp, &tl) != MJSON_TOK_INVALID)
         return;
 
-    // ── Fast path 4: setupComplete ──
-    if (strstr(buf, "\"setupComplete\""))
+    // ── Setup complete ──
+    if (mjson_find(buf, len, "$.setupComplete", &tp, &tl) != MJSON_TOK_INVALID)
     {
         ESP_LOGI(TAG, "Setup complete");
         xEventGroupSetBits(ctx->event_group, S2S_SETUP_COMPLETE_BIT);
         return;
     }
 
-    // ── Fast path 5: goAway ──
-    if (strstr(buf, "\"goAway\""))
+    // ── Go away ──
+    if (mjson_find(buf, len, "$.goAway", &tp, &tl) != MJSON_TOK_INVALID)
     {
         ESP_LOGW(TAG, "Server sent goAway, will reconnect");
         xEventGroupSetBits(ctx->event_group, S2S_ERROR_BIT);
         return;
     }
 
-    // ── Transcriptions (mjson, zero-alloc) ──
-    int len = ctx->msg_buf_len;
+    // ── Standalone transcriptions ──
     char txt_buf[256];
     int n;
 
-    if (strstr(buf, "\"inputTranscription\""))
+    n = mjson_get_string(buf, len, "$.serverContent.inputTranscription.text", txt_buf, sizeof(txt_buf));
+    if (n > 0)
     {
-        n = mjson_get_string(buf, len, "$.serverContent.inputTranscription.text", txt_buf, sizeof(txt_buf));
-        if (n > 0)
+        if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(50)) == pdTRUE)
-            {
-                ctx->shared->input_transcript.append(txt_buf, n);
-                xSemaphoreGive(ctx->shared->mutex);
-                xEventGroupSetBits(ctx->event_group, S2S_INPUT_TRANSCRIPT_BIT);
-            }
+            ctx->shared->input_transcript.append(txt_buf, n);
+            xSemaphoreGive(ctx->shared->mutex);
+            xEventGroupSetBits(ctx->event_group, S2S_INPUT_TRANSCRIPT_BIT);
         }
         return;
     }
-
-    if (strstr(buf, "\"outputTranscription\""))
+    n = mjson_get_string(buf, len, "$.serverContent.outputTranscription.text", txt_buf, sizeof(txt_buf));
+    if (n > 0)
     {
-        n = mjson_get_string(buf, len, "$.serverContent.outputTranscription.text", txt_buf, sizeof(txt_buf));
-        if (n > 0)
+        if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            if (xSemaphoreTake(ctx->shared->mutex, pdMS_TO_TICKS(50)) == pdTRUE)
-            {
-                ctx->shared->output_transcript.append(txt_buf, n);
-                xSemaphoreGive(ctx->shared->mutex);
-                xEventGroupSetBits(ctx->event_group, S2S_OUTPUT_TRANSCRIPT_BIT);
-            }
+            ctx->shared->output_transcript.append(txt_buf, n);
+            xSemaphoreGive(ctx->shared->mutex);
+            xEventGroupSetBits(ctx->event_group, S2S_OUTPUT_TRANSCRIPT_BIT);
         }
         return;
     }
 
     // ── Error ──
-    if (strstr(buf, "\"error\""))
+    if (mjson_find(buf, len, "$.error", &tp, &tl) != MJSON_TOK_INVALID)
     {
         double code = 0;
         mjson_get_number(buf, len, "$.error.code", &code);
@@ -407,8 +408,8 @@ static void s2s_process_message(s2s_context_t* ctx)
     }
 
     // ── Ignore remaining known-harmless messages ──
-    // Empty serverContent (VAD signals), usageMetadata, etc.
-    if (strstr(buf, "\"serverContent\"") || strstr(buf, "\"usageMetadata\""))
+    if (mjson_find(buf, len, "$.serverContent", &tp, &tl) != MJSON_TOK_INVALID ||
+        mjson_find(buf, len, "$.usageMetadata", &tp, &tl) != MJSON_TOK_INVALID)
         return;
 
     ESP_LOGW(TAG, "Unrecognized msg: %.200s", buf);
@@ -434,42 +435,44 @@ static bool s2s_send_setup(s2s_context_t* ctx)
     char voice_snippet[200] = "";
     if (!ctx->voice.empty())
     {
-        mjson_snprintf(voice_snippet, sizeof(voice_snippet),
-            ",\"speechConfig\":{\"voiceConfig\":{\"prebuiltVoiceConfig\":{\"voiceName\":%Q}}}",
-            ctx->voice.c_str());
+        mjson_snprintf(voice_snippet,
+                       sizeof(voice_snippet),
+                       ",\"speechConfig\":{\"voiceConfig\":{\"prebuiltVoiceConfig\":{\"voiceName\":%Q}}}",
+                       ctx->voice.c_str());
     }
 
     char rules_snippet[1200] = "";
     if (!ctx->rules.empty())
     {
-        mjson_snprintf(rules_snippet, sizeof(rules_snippet),
-            "\"systemInstruction\":{\"parts\":[{\"text\":%Q}]},",
-            ctx->rules.c_str());
+        mjson_snprintf(rules_snippet,
+                       sizeof(rules_snippet),
+                       "\"systemInstruction\":{\"parts\":[{\"text\":%Q}]},",
+                       ctx->rules.c_str());
     }
 
     char handle_snippet[200] = "";
     if (!handle.empty())
     {
-        mjson_snprintf(handle_snippet, sizeof(handle_snippet),
-            "\"handle\":%Q", handle.c_str());
+        mjson_snprintf(handle_snippet, sizeof(handle_snippet), "\"handle\":%Q", handle.c_str());
     }
 
     // Assemble final JSON into the static send buffer
     char* buf = s_json_buf;
     int cap = (int)sizeof(s_json_buf);
-    int n = snprintf(buf, cap,
-        "{\"setup\":{"
-        "\"model\":\"%s\","
-        "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"]%s},"
-        "%s"
-        "\"inputAudioTranscription\":{},"
-        "\"outputAudioTranscription\":{},"
-        "\"sessionResumption\":{%s}"
-        "}}",
-        model_path.c_str(),
-        voice_snippet,
-        rules_snippet,
-        handle_snippet);
+    int n = snprintf(buf,
+                     cap,
+                     "{\"setup\":{"
+                     "\"model\":\"%s\","
+                     "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"]%s},"
+                     "%s"
+                     "\"inputAudioTranscription\":{},"
+                     "\"outputAudioTranscription\":{},"
+                     "\"sessionResumption\":{%s}"
+                     "}}",
+                     model_path.c_str(),
+                     voice_snippet,
+                     rules_snippet,
+                     handle_snippet);
 
     if (n <= 0 || n >= cap)
     {
@@ -490,16 +493,15 @@ static bool s2s_send_audio(s2s_context_t* ctx, const uint8_t* pcm, size_t pcm_le
     memcpy(s_json_buf, JSON_AUDIO_PREFIX, JSON_PREFIX_LEN);
 
     size_t b64_len = 0;
-    int ret = mbedtls_base64_encode((unsigned char*)s_json_buf + JSON_PREFIX_LEN,
-                                    MAX_B64_LEN, &b64_len, pcm, pcm_len);
-    if (ret != 0) return false;
+    int ret = mbedtls_base64_encode((unsigned char*)s_json_buf + JSON_PREFIX_LEN, MAX_B64_LEN, &b64_len, pcm, pcm_len);
+    if (ret != 0)
+        return false;
 
     memcpy(s_json_buf + JSON_PREFIX_LEN + b64_len, JSON_AUDIO_SUFFIX, JSON_SUFFIX_LEN);
     size_t total = JSON_PREFIX_LEN + b64_len + JSON_SUFFIX_LEN;
     s_json_buf[total] = '\0';
 
-    int sent = esp_websocket_client_send_text(ctx->ws_client, s_json_buf, total,
-                                              pdMS_TO_TICKS(3000));
+    int sent = esp_websocket_client_send_text(ctx->ws_client, s_json_buf, total, pdMS_TO_TICKS(3000));
     return sent == (int)total;
 }
 
@@ -513,9 +515,8 @@ static void s2s_client_task(void* parameter)
     ESP_LOGI(TAG, "S2S task started, heap=%lu", (unsigned long)esp_get_free_heap_size());
 
     // ── Wait for WebSocket connection ──
-    EventBits_t bits = xEventGroupWaitBits(ctx->event_group,
-                                           S2S_CONNECTED_BIT | S2S_STOP_REQUEST_BIT,
-                                           pdFALSE, pdFALSE, pdMS_TO_TICKS(15000));
+    EventBits_t bits =
+        xEventGroupWaitBits(ctx->event_group, S2S_CONNECTED_BIT | S2S_STOP_REQUEST_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(15000));
     if (!(bits & S2S_CONNECTED_BIT))
     {
         ESP_LOGE(TAG, "WS connect timeout");
@@ -534,7 +535,9 @@ static void s2s_client_task(void* parameter)
     // ── Wait for setupComplete ──
     bits = xEventGroupWaitBits(ctx->event_group,
                                S2S_SETUP_COMPLETE_BIT | S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT,
-                               pdFALSE, pdFALSE, pdMS_TO_TICKS(15000));
+                               pdFALSE,
+                               pdFALSE,
+                               pdMS_TO_TICKS(15000));
     if (!(bits & S2S_SETUP_COMPLETE_BIT))
     {
         if (!(bits & S2S_FATAL_ERROR_BIT))
@@ -554,17 +557,20 @@ static void s2s_client_task(void* parameter)
         // LISTENING PHASE: capture mic → send audio
         // ──────────────────────────────
         xEventGroupClearBits(ctx->event_group,
-                             S2S_MODEL_SPEAKING_BIT | S2S_TURN_COMPLETE_BIT |
-                             S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT);
+                             S2S_MODEL_SPEAKING_BIT | S2S_TURN_COMPLETE_BIT | S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT);
 
         // Flush any stale audio left in the speaker ring buffer
         {
             size_t flush_size;
             void* flush_item;
-            while ((flush_item = xRingbufferReceiveUpTo(ctx->spk_ring_buffer, &flush_size,
-                                                        0, 4096)) != NULL)
+            while ((flush_item = xRingbufferReceiveUpTo(ctx->spk_ring_buffer, &flush_size, 0, 4096)) != NULL)
                 vRingbufferReturnItem(ctx->spk_ring_buffer, flush_item);
         }
+        ctx->payload_decoded = 0;
+        ctx->rb_bytes_written = 0;
+        ctx->rb_bytes_read = 0;
+        ctx->crc_received = 0;
+        ctx->crc_played = 0;
 
         ctx->hal->speaker()->end();
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -581,17 +587,16 @@ static void s2s_client_task(void* parameter)
         while (true)
         {
             bits = xEventGroupGetBits(ctx->event_group);
-            if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_MODEL_SPEAKING_BIT |
-                        S2S_USER_INTERRUPT_BIT))
+            if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_MODEL_SPEAKING_BIT | S2S_USER_INTERRUPT_BIT))
                 break;
 
-            if (!ctx->hal->mic()->record(s_rec_buf[rec_wr], MIC_BUF_SAMPLES,
-                                         S2S_MIC_SAMPLE_RATE, false))
+            if (!ctx->hal->mic()->record(s_rec_buf[rec_wr], MIC_BUF_SAMPLES, S2S_MIC_SAMPLE_RATE, false))
                 continue;
 
             rec_queued++;
             rec_wr = (rec_wr + 1) % MIC_REC_BLOCKS;
-            if (rec_queued < MIC_REC_BLOCKS) continue;
+            if (rec_queued < MIC_REC_BLOCKS)
+                continue;
 
             int16_t* frame = s_rec_buf[rec_wr]; // slot freed 3 calls ago
 
@@ -600,9 +605,15 @@ static void s2s_client_task(void* parameter)
             {
                 bool silent = true;
                 for (int i = 0; i < MIC_BUF_SAMPLES; i++)
-                    if (frame[i] != 0) { silent = false; break; }
-                if (silent) continue;
-                if (warmup_skip++ < 2) continue;
+                    if (frame[i] != 0)
+                    {
+                        silent = false;
+                        break;
+                    }
+                if (silent)
+                    continue;
+                if (warmup_skip++ < 2)
+                    continue;
                 mic_warmed = true;
             }
 
@@ -626,8 +637,7 @@ static void s2s_client_task(void* parameter)
             s2s_send_audio(ctx, s_pcm_buf, pcm_pos);
 
         // Tell server mic stream paused
-        esp_websocket_client_send_text(ctx->ws_client, JSON_STREAM_END,
-                                       sizeof(JSON_STREAM_END) - 1, pdMS_TO_TICKS(2000));
+        esp_websocket_client_send_text(ctx->ws_client, JSON_STREAM_END, sizeof(JSON_STREAM_END) - 1, pdMS_TO_TICKS(2000));
 
         ctx->hal->mic()->end();
         xEventGroupClearBits(ctx->event_group, S2S_LISTENING_BIT);
@@ -638,6 +648,27 @@ static void s2s_client_task(void* parameter)
         // ──────────────────────────────
         // SPEAKING PHASE: drain ring buffer → speaker
         // ──────────────────────────────
+
+        // Pre-buffer: let the ring buffer fill before starting the speaker
+        // to absorb network burst variability and prevent early underruns.
+        // {
+        //     const size_t PRE_BUFFER_BYTES = 12000; // ~250ms at 24kHz 16-bit
+        //     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+        //     while (xTaskGetTickCount() < deadline)
+        //     {
+        //         bits = xEventGroupGetBits(ctx->event_group);
+        //         if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT |
+        //                     S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT))
+        //             break;
+        //         if (bits & S2S_TURN_COMPLETE_BIT)
+        //             break;
+        //         size_t free_bytes = xRingbufferGetCurFreeSize(ctx->spk_ring_buffer);
+        //         if (AUDIO_BUFFER_SIZE - free_bytes >= PRE_BUFFER_BYTES)
+        //             break;
+        //         vTaskDelay(pdMS_TO_TICKS(20));
+        //     }
+        // }
+
         vTaskDelay(pdMS_TO_TICKS(20));
         ctx->hal->speaker()->begin();
         ctx->hal->speaker()->setVolume(255);
@@ -645,48 +676,125 @@ static void s2s_client_task(void* parameter)
         ESP_LOGI(TAG, "Playing response...");
 
         bool turn_ended = false;
+        uint32_t total_bytes = 0;
+        uint32_t underruns = 0;
+        uint32_t play_start = millis();
+        uint8_t carry_byte = 0;
+        bool have_carry = false;
+
+        // Triple buffer: playRaw stores a pointer (no copy), so we must keep
+        // the data alive until the speaker is done. With 3 buffers and the
+        // isPlaying()>=2 gate, the speaker can hold current + next while we
+        // safely write to the third.
+        static int16_t play_buf[3][PLAY_CHUNK_SIZE / sizeof(int16_t)];
+        int buf_idx = 0;
+
         while (true)
         {
             bits = xEventGroupGetBits(ctx->event_group);
-            if (bits & S2S_STOP_REQUEST_BIT) break;
-            if (bits & (S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT)) break;
-            if (bits & S2S_TURN_COMPLETE_BIT) turn_ended = true;
+            if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT))
+                break;
+            if (bits & (S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT))
+                break;
+            if (bits & S2S_TURN_COMPLETE_BIT)
+                turn_ended = true;
 
             size_t item_size = 0;
-            uint8_t* item = (uint8_t*)xRingbufferReceiveUpTo(
-                ctx->spk_ring_buffer, &item_size,
-                pdMS_TO_TICKS(turn_ended ? 10 : 200), PLAY_CHUNK_SIZE);
+            uint8_t* item = (uint8_t*)
+                xRingbufferReceiveUpTo(ctx->spk_ring_buffer, &item_size, pdMS_TO_TICKS(turn_ended ? 10 : 200), PLAY_CHUNK_SIZE);
 
             if (item)
             {
-                ctx->hal->speaker()->playRaw(
-                    reinterpret_cast<const int16_t*>(item),
-                    item_size / sizeof(int16_t),
-                    S2S_SPK_SAMPLE_RATE,
-                    false, 1, AUDIO_CHANNEL, false);
+                ctx->rb_bytes_read += item_size;
+                uint8_t* pcm = item;
+                size_t pcm_len = item_size;
 
-                while (ctx->hal->speaker()->isPlaying())
-                    vTaskDelay(pdMS_TO_TICKS(1));
+                // Reconstruct split sample from previous chunk's trailing byte
+                size_t dst_off = 0;
+                if (have_carry && pcm_len > 0)
+                {
+                    int16_t sample = (int16_t)(carry_byte | ((uint16_t)pcm[0] << 8));
+                    play_buf[buf_idx][0] = sample;
+                    dst_off = 1;
+                    pcm++;
+                    pcm_len--;
+                    have_carry = false;
+                }
 
+                // Save trailing byte if odd
+                if (pcm_len & 1)
+                {
+                    carry_byte = pcm[pcm_len - 1];
+                    have_carry = true;
+                    pcm_len--;
+                }
+
+                // Copy PCM to play buffer and release ring buffer item
+                if (pcm_len > 0)
+                    memcpy(&play_buf[buf_idx][dst_off], pcm, pcm_len);
                 vRingbufferReturnItem(ctx->spk_ring_buffer, item);
+
+                size_t total_samples = dst_off + pcm_len / sizeof(int16_t);
+                total_bytes += total_samples * sizeof(int16_t);
+
+                if (total_samples > 0)
+                {
+                    ctx->crc_played =
+                        esp_rom_crc32_le(ctx->crc_played, (const uint8_t*)play_buf[buf_idx], total_samples * sizeof(int16_t));
+
+                    while (ctx->hal->speaker()->isPlaying(AUDIO_CHANNEL) >= 2)
+                        vTaskDelay(1);
+
+                    ctx->hal->speaker()
+                        ->playRaw(play_buf[buf_idx], total_samples, S2S_SPK_SAMPLE_RATE, false, 1, AUDIO_CHANNEL, false);
+                    buf_idx = (buf_idx + 1) % 3;
+                }
             }
             else if (turn_ended)
             {
                 break;
             }
+            else
+            {
+                underruns++;
+                ESP_LOGW(TAG,
+                         "Speaker underrun #%lu (rb empty, %lums into playback)",
+                         (unsigned long)underruns,
+                         (unsigned long)(millis() - play_start));
+            }
         }
+        ESP_LOGI(TAG,
+                 "Playback stats: decoded=%lu rb_wr=%lu rb_rd=%lu played=%lu underruns=%lu %lums%s",
+                 (unsigned long)ctx->payload_decoded,
+                 (unsigned long)ctx->rb_bytes_written,
+                 (unsigned long)ctx->rb_bytes_read,
+                 (unsigned long)total_bytes,
+                 (unsigned long)underruns,
+                 (unsigned long)(millis() - play_start),
+                 (ctx->payload_decoded != ctx->rb_bytes_written || ctx->rb_bytes_written != ctx->rb_bytes_read ||
+                  ctx->rb_bytes_read != total_bytes)
+                     ? " **MISMATCH**"
+                     : "");
 
-        // Flush speaker if interrupted (server-side or user-initiated)
+        ESP_LOGI(TAG,
+                 "CRC check: received=0x%08lx played=0x%08lx %s",
+                 (unsigned long)ctx->crc_received,
+                 (unsigned long)ctx->crc_played,
+                 (ctx->crc_received == ctx->crc_played) ? "MATCH" : "**MISMATCH**");
+
         if (xEventGroupGetBits(ctx->event_group) & (S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT))
         {
             ctx->hal->speaker()->stop();
             size_t discard_size;
             void* discard;
-            while ((discard = xRingbufferReceiveUpTo(ctx->spk_ring_buffer, &discard_size,
-                                                     0, 4096)) != NULL)
+            while ((discard = xRingbufferReceiveUpTo(ctx->spk_ring_buffer, &discard_size, 0, 4096)) != NULL)
                 vRingbufferReturnItem(ctx->spk_ring_buffer, discard);
         }
-
+        else
+        {
+            while (ctx->hal->speaker()->isPlaying(AUDIO_CHANNEL))
+                vTaskDelay(1);
+        }
         ctx->hal->speaker()->stop();
         ESP_LOGI(TAG, "Turn done");
     }
@@ -707,9 +815,13 @@ exit:
 // Public API
 // ═══════════════════════════════════════════════════════════
 
-bool s2s_start(HAL::Hal* hal, EventGroupHandle_t event_group, S2SSharedData* shared,
-               const std::string& api_key, const std::string& model,
-               const std::string& voice, const std::string& rules,
+bool s2s_start(HAL::Hal* hal,
+               EventGroupHandle_t event_group,
+               S2SSharedData* shared,
+               const std::string& api_key,
+               const std::string& model,
+               const std::string& voice,
+               const std::string& rules,
                int32_t volume)
 {
     ESP_LOGI(TAG, "Starting S2S session...");
@@ -737,8 +849,8 @@ bool s2s_start(HAL::Hal* hal, EventGroupHandle_t event_group, S2SSharedData* sha
     s2s_ctx.msg_buf_len = 0;
 
     // Create speaker ring buffer using the shared static audio buffer
-    s2s_ctx.spk_ring_buffer = xRingbufferCreateStatic(
-        AUDIO_BUFFER_SIZE, RINGBUF_TYPE_BYTEBUF, audio_buffer, &s2s_ctx.spk_rb_struct);
+    s2s_ctx.spk_ring_buffer =
+        xRingbufferCreateStatic(AUDIO_BUFFER_SIZE, RINGBUF_TYPE_BYTEBUF, audio_buffer, &s2s_ctx.spk_rb_struct);
     if (!s2s_ctx.spk_ring_buffer)
     {
         ESP_LOGE(TAG, "Failed to create speaker ring buffer");
@@ -764,8 +876,7 @@ bool s2s_start(HAL::Hal* hal, EventGroupHandle_t event_group, S2SSharedData* sha
         }
     }
 
-    esp_websocket_register_events(s2s_ctx.ws_client, WEBSOCKET_EVENT_ANY,
-                                  s2s_ws_event_handler, &s2s_ctx);
+    esp_websocket_register_events(s2s_ctx.ws_client, WEBSOCKET_EVENT_ANY, s2s_ws_event_handler, &s2s_ctx);
 
     if (esp_websocket_client_start(s2s_ctx.ws_client) != ESP_OK)
     {
@@ -774,8 +885,8 @@ bool s2s_start(HAL::Hal* hal, EventGroupHandle_t event_group, S2SSharedData* sha
     }
 
     // Create the main S2S task
-    if (xTaskCreate(s2s_client_task, "s2s_task", S2S_TASK_STACK_SIZE,
-                    &s2s_ctx, S2S_TASK_PRIORITY, &s2s_ctx.task_handle) != pdPASS)
+    if (xTaskCreate(s2s_client_task, "s2s_task", S2S_TASK_STACK_SIZE, &s2s_ctx, S2S_TASK_PRIORITY, &s2s_ctx.task_handle) !=
+        pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create S2S task");
         goto fail;
@@ -806,8 +917,7 @@ void s2s_stop(void)
     xEventGroupSetBits(s2s_ctx.event_group, S2S_STOP_REQUEST_BIT);
 
     // Wait for the task to exit
-    xEventGroupWaitBits(s2s_ctx.event_group, S2S_TASK_STOPPED_BIT,
-                        pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+    xEventGroupWaitBits(s2s_ctx.event_group, S2S_TASK_STOPPED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
 
     if (s2s_ctx.ws_client)
     {
