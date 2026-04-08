@@ -88,6 +88,8 @@ idf.py -p [Your-Serial-Port] flash monitor
 
 [![YouTube video](https://img.youtube.com/vi/NF_7Dyx2gLY/0.jpg)](https://www.youtube.com/watch?v=NF_7Dyx2gLY)
 
+[![S2S Demo](https://img.youtube.com/vi/3MHIc3bUb94/0.jpg)](https://youtube.com/shorts/3MHIc3bUb94?si=4pxLwXzcZXVly9VV)
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests or open issues.
