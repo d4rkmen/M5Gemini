@@ -29,7 +29,11 @@ static const char* API_KEY_HINT = "[ENTER] [ESC]";
 static bool is_repeat = false;
 static uint32_t next_fire_ts = 0xFFFFFFFF;
 static bool is_rendered = false;
-
+#if 0
+static constexpr int ICON_SZ = 50;
+static uint16_t s_anim_bg[ICON_SZ * ICON_SZ];
+static bool s_anim_bg_valid = false;
+#endif
 #define HINT_HEIGHT 12
 
 extern const uint8_t snap_wav_start[] asm("_binary_snap_wav_start");
@@ -838,59 +842,70 @@ void GeminiApp::setState(AppState state)
         return;
     ESP_LOGI(TAG, "State -> %d, heap=%lu", state, (unsigned long)esp_get_free_heap_size());
     _appState = state;
+    // s_anim_bg_valid = false;
     _anim_context.timer_start = millis();
+    // _anim_context.last_alpha = 255;
 }
 
+// Draw the animation
 bool GeminiApp::drawAnimation(bool need_update)
 {
+    const uint16_t* icon = nullptr;
     switch (_appState)
     {
     case APP_STATE_IDLE:
-        _sprite->fillScreen(THEME_COLOR_BG);
         break;
     case APP_STATE_DISCONNECTED:
-        _sprite->pushImage(0, 0, 50, 50, image_data_disconnected);
+        icon = image_data_disconnected;
         break;
     case APP_STATE_S2S_ERROR:
-        _sprite->pushImage(0, 0, 50, 50, image_data_conn_error);
+        icon = image_data_conn_error;
         break;
     case APP_STATE_CONNECTING_WIFI:
-        _sprite->pushImage(0, 0, 50, 50, image_data_connecting_wifi);
+        icon = image_data_connecting_wifi;
         break;
     case APP_STATE_S2S_CONNECTING:
-        _sprite->pushImage(0, 0, 50, 50, image_data_connecting_internet);
+        icon = image_data_connecting_internet;
         break;
     case APP_STATE_S2S_SPEAKING:
-        _sprite->pushImage(0, 0, 50, 50, image_data_playing3);
+        icon = image_data_playing3;
         break;
     case APP_STATE_S2S_LISTENING:
-        _sprite->pushImage(0, 0, 50, 50, image_data_mic);
+        icon = image_data_mic;
         break;
     }
+    if (icon)
+        _sprite->pushImage(0, 0, 50, 50, icon);
 
     uint32_t timer_now = millis();
+    // int x_offset = (_hal->canvas()->width() - _sprite->width()) / 2;
+    // int y_offset = (_hal->canvas()->height() - _sprite->height()) / 2;
     int x_offset = _hal->canvas()->width() - _sprite->width() - 1;
     int y_offset = 0;
 
     uint32_t full_pos = (timer_now - _anim_context.timer_start) % (_anim_context.duration * 2);
     uint32_t timer_pos = (full_pos % _anim_context.duration) * _anim_context.steps / _anim_context.duration;
+    // make reverse move when > duration
     float ifloat;
     if (full_pos >= _anim_context.duration)
-        ifloat = easeOutExpo(float(_anim_context.steps - timer_pos) / float(_anim_context.steps));
+    {
+        ifloat = easeInOutSine(float(_anim_context.steps - timer_pos) / float(_anim_context.steps));
+    }
     else
-        ifloat = easeOutExpo(float(timer_pos) / float(_anim_context.steps));
-
+    {
+        ifloat = easeInOutSine(float(timer_pos) / float(_anim_context.steps));
+    }
     uint8_t alpha = ifloat * 255;
     if (alpha == _anim_context.last_alpha && need_update == false)
         return false;
     _anim_context.last_alpha = alpha;
-
+    // mixing sprite with background according to alpha
     for (int py = 0; py < _sprite->height(); py++)
     {
         for (int px = 0; px < _sprite->width(); px++)
         {
-            uint16_t fg = _sprite->readPixel(px, py);
-            uint16_t bg = _hal->canvas()->readPixel(px + x_offset, py + y_offset);
+            uint16_t fg = _sprite->readPixel(px, py);                              // foreground (sprite pixel)
+            uint16_t bg = _hal->canvas()->readPixel(px + x_offset, py + y_offset); // background pixel
 
             uint32_t fg24 = _sprite->color16to24(fg);
             uint8_t fg_r = (fg24 >> 16) & 0xFF;
@@ -905,7 +920,7 @@ bool GeminiApp::drawAnimation(bool need_update)
             uint8_t r = (fg_r * alpha + bg_r * (255 - alpha)) / 255;
             uint8_t g = (fg_g * alpha + bg_g * (255 - alpha)) / 255;
             uint8_t b = (fg_b * alpha + bg_b * (255 - alpha)) / 255;
-
+            // transparent color
             if (fg == THEME_COLOR_BG)
                 _sprite->drawPixel(px, py, _sprite->color888(bg_r, bg_g, bg_b));
             else
@@ -916,3 +931,88 @@ bool GeminiApp::drawAnimation(bool need_update)
     is_rendered = false;
     return true;
 }
+#if 0
+bool GeminiApp::drawAnimation(bool need_update)
+{
+    const uint16_t* icon = nullptr;
+    switch (_appState)
+    {
+    case APP_STATE_IDLE:
+        break;
+    case APP_STATE_DISCONNECTED:
+        icon = image_data_disconnected;
+        break;
+    case APP_STATE_S2S_ERROR:
+        icon = image_data_conn_error;
+        break;
+    case APP_STATE_CONNECTING_WIFI:
+        icon = image_data_connecting_wifi;
+        break;
+    case APP_STATE_S2S_CONNECTING:
+        icon = image_data_connecting_internet;
+        break;
+    case APP_STATE_S2S_SPEAKING:
+        icon = image_data_playing3;
+        break;
+    case APP_STATE_S2S_LISTENING:
+        icon = image_data_mic;
+        break;
+    }
+
+    auto canvas = _hal->canvas();
+    int x_off = canvas->width() - ICON_SZ - 1;
+
+    if (!icon)
+    {
+        if (s_anim_bg_valid)
+        {
+            canvas->pushImage(x_off, 0, ICON_SZ, ICON_SZ, s_anim_bg);
+            s_anim_bg_valid = false;
+            return true;
+        }
+        return false;
+    }
+
+    uint32_t timer_now = millis();
+    uint32_t full_pos = (timer_now - _anim_context.timer_start) % (_anim_context.duration * 2);
+    float t = float(full_pos) / float(_anim_context.duration * 2);
+    float ifloat = easeInOutSine(t < 0.5f ? t * 2.0f : 2.0f - t * 2.0f);
+
+    uint8_t alpha = (uint8_t)(ifloat * 255);
+    if (alpha == _anim_context.last_alpha && !need_update)
+        return false;
+    _anim_context.last_alpha = alpha;
+
+    if (!s_anim_bg_valid || need_update)
+        canvas->readRect(x_off, 0, ICON_SZ, ICON_SZ, s_anim_bg);
+    else
+        canvas->pushImage(x_off, 0, ICON_SZ, ICON_SZ, s_anim_bg);
+    s_anim_bg_valid = true;
+
+    _sprite->pushImage(0, 0, ICON_SZ, ICON_SZ, icon);
+    uint8_t inv_alpha = 255 - alpha;
+
+    for (int py = 0; py < ICON_SZ; py++)
+    {
+        for (int px = 0; px < ICON_SZ; px++)
+        {
+            uint16_t fg = _sprite->readPixel(px, py);
+            if (fg == THEME_COLOR_BG)
+                continue;
+
+            uint16_t bg = canvas->readPixel(x_off + px, py);
+
+            uint32_t fg24 = canvas->color16to24(fg);
+            uint32_t bg24 = canvas->color16to24(bg);
+
+            uint8_t r = (((fg24 >> 16) & 0xFF) * alpha + ((bg24 >> 16) & 0xFF) * inv_alpha) / 255;
+            uint8_t g = (((fg24 >> 8) & 0xFF) * alpha + ((bg24 >> 8) & 0xFF) * inv_alpha) / 255;
+            uint8_t b = ((fg24 & 0xFF) * alpha + (bg24 & 0xFF) * inv_alpha) / 255;
+
+            canvas->drawPixel(x_off + px, py, canvas->color888(r, g, b));
+        }
+    }
+
+    return true;
+}
+#endif
