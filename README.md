@@ -1,13 +1,14 @@
 # M5Gemini
 
-M5Gemini is a conversational AI assistant for the ESP32-S3 powered M5 Cardputer mini PC. It utilizes Deepgram API for Speech-to-Text (STT), Elevenlabs API for Text-to-Speech (TTS), and Google's Gemini API for AI response generation. The application uses the M5 Cardputer's built-in microphone and speaker for interaction.
+M5Gemini is a voice-driven AI assistant for the ESP32-S3 powered M5 Cardputer mini PC. It uses Google Gemini's Live API for real-time Speech-to-Speech (S2S) conversation over a single WebSocket connection. The application uses the M5 Cardputer's built-in microphone and speaker for hands-free interaction.
 
 ## Features
 
-- Conversational AI interaction powered by Google Gemini.
-- Speech-to-Text using Deepgram API.
-- Text-to-Speech using Elevenlabs API.
-- Utilizes the built-in microphone and speaker of the M5 Cardputer.
+- Real-time voice conversation powered by Google Gemini Live API (Speech-to-Speech).
+- Half-duplex audio: microphone and speaker alternate automatically via server-side VAD.
+- Streaming text transcription displayed during playback.
+- Configurable model, voice, and system instructions.
+- Automatic session reconnection on transient errors; error dialogs for critical failures.
 - Settings management compatible with M5Apps installer.
 
 ## Prerequisites
@@ -15,9 +16,7 @@ M5Gemini is a conversational AI assistant for the ESP32-S3 powered M5 Cardputer 
 - ESP-IDF v5.4 or later
 - M5 Cardputer hardware
 - WiFi internet connection (2.4GHz) for API access
-- Google AI API Key ([Link to get Google AI Key])
-- Deepgram API Key ([Link to get Deepgram Key])
-- Elevenlabs API Key ([Link to get Elevenlabs Key])
+- Google AI API Key (https://aistudio.google.com/apikey)
 
 ## Getting Started
 
@@ -30,15 +29,15 @@ cd M5Gemini
 
 ### 2. Configuration
 
-Configuration settings (WiFi credentials, API Keys) are compatible with and M5Apps.
+Configuration settings (WiFi credentials, API keys) are compatible with M5Apps.
 
 - **Configuration Methods:**
 
   1.  **Manual Configuration on Device:**
       - Press `ESC` to enter Settings menu
       - Navigate using arrow keys and Enter to select
-      - Configure WiFi, API keys, and other settings
-      - Settings are automatically saved to M5Apps NVS storage and will remain even after app reinstallation
+      - Configure WiFi, API key, model, voice, and other settings
+      - Settings are automatically saved to NVS storage and persist across reinstalls
   2.  **Import Configuration File:** - Create a `settings.txt` file with your configuration - Example `settings.txt`:
 
   ```ini
@@ -54,18 +53,10 @@ Configuration settings (WiFi credentials, API Keys) are compatible with and M5Ap
     system-volume=70
     system-boot_sound=true
     gemini-api_key=YOUR_GEMINI_API_KEY
-    gemini-model=gemini-2.0-flash
-    gemini-rules=you are conversational AI assistant with STT and TTS features running on M5 Cardputer the ESP32-S3 device. your name is Cardputer. always answer using ASCII characters only. limit your response to 800 tokens. give short direct and a quite funny answer to the question. start your answer with something like: 'yes, master', 'your wish is my command' and so on
-    elevenlabs-enabled=true
-    elevenlabs-volume=255
-    elevenlabs-api_key=YOUR_ELEVENLABS_API_KEY
-    elevenlabs-voice=0sGQQaD2G2X1s87kHM5b
-    elevenlabs-model=eleven_multilingual_v2
-    deepgram-enabled=true
-    deepgram-sensetivity=2
-    deepgram-api_key=YOUR_DEEPGRAM_API_KEY
-    deepgram-endpointing=600
-    deepgram-model=nova-3
+    gemini-model=gemini-2.0-flash-live-001
+    gemini-voice=Kore
+    gemini-volume=255
+    gemini-rules=you are conversational AI assistant running on M5 CardPuter. give short direct and a quite funny answer.
   ```
 
   - Copy file to SD card root as `/sdcard/settings.txt`
@@ -89,11 +80,13 @@ idf.py -p [Your-Serial-Port] flash monitor
 
 ## Usage
 
-- From the start screen press `ESC` to enter Settings menu or `ENTER` to start conversation
-- In chat screen hold [Fn] button to edit previous prompt
+- From the start screen press `ESC` to enter Settings or `ENTER` to start a voice session.
+- During a session the keyboard is used for control:
+  - `ENTER` — interrupt (skip playback or send during listening)
+  - `ESC` — stop session and return to start screen
+  - Arrow keys — scroll chat history
 
 [![YouTube video](https://img.youtube.com/vi/NF_7Dyx2gLY/0.jpg)](https://www.youtube.com/watch?v=NF_7Dyx2gLY)
-
 
 ## Contributing
 
@@ -105,8 +98,7 @@ This project is licensed under the GNU General Public License
 
 ## Acknowledgements
 
-- Google AI (Gemini)
-- Deepgram (STT)
-- Elevenlabs (TTS)
+- Google AI (Gemini Live API)
 - M5Stack (M5Unified library)
 - LovyanGFX (Display)
+- mjson (Embedded JSON parser)
