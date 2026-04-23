@@ -12,7 +12,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.3
+    version: 5.5.4
 direct_dependencies:
 - espressif/esp_websocket_client
 - idf
