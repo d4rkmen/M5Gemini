@@ -273,21 +273,41 @@ static void s2s_process_message(s2s_context_t* ctx)
             txt_n = mjson_get_string(buf, len, "$.serverContent.inputTranscription.text", txt_buf, sizeof(txt_buf));
 
         // Decode and enqueue all audio parts
-        xEventGroupSetBits(ctx->event_group, S2S_MODEL_SPEAKING_BIT);
+        const EventBits_t drop_mask =
+            S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT | S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT;
+        bool drop = xEventGroupGetBits(ctx->event_group) & drop_mask;
+        if (!drop)
+            xEventGroupSetBits(ctx->event_group, S2S_MODEL_SPEAKING_BIT);
         for (int i = 0; i < part_count; i++)
         {
             size_t decoded_len = base64_decode_inplace((uint8_t*)parts[i].b64, parts[i].len);
             ESP_LOGD(TAG, "Audio[%d/%d]: b64=%d decoded=%d", i, part_count, (int)parts[i].len, (int)decoded_len);
-            if (decoded_len > 0)
+            if (decoded_len == 0 || drop || !ctx->spk_ring_buffer)
+                continue;
+
+            ctx->payload_decoded += decoded_len;
+            ctx->crc_received = esp_rom_crc32_le(ctx->crc_received, (const uint8_t*)parts[i].b64, decoded_len);
+
+            // Bounded wait + stop-bit check to avoid deadlock if the consumer
+            // task has exited while the buffer is full.
+            bool sent = false;
+            for (int tries = 0; tries < 20; tries++)
             {
-                ctx->payload_decoded += decoded_len;
-                ctx->crc_received = esp_rom_crc32_le(ctx->crc_received, (const uint8_t*)parts[i].b64, decoded_len);
-                if (ctx->spk_ring_buffer)
+                if (xEventGroupGetBits(ctx->event_group) & drop_mask)
                 {
-                    xRingbufferSend(ctx->spk_ring_buffer, parts[i].b64, decoded_len, portMAX_DELAY);
-                    ctx->rb_bytes_written += decoded_len;
+                    drop = true;
+                    break;
+                }
+                if (xRingbufferSend(ctx->spk_ring_buffer, parts[i].b64, decoded_len, pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    sent = true;
+                    break;
                 }
             }
+            if (sent)
+                ctx->rb_bytes_written += decoded_len;
+            else if (!drop)
+                ESP_LOGW(TAG, "Audio ring buffer full, dropping %d bytes", (int)decoded_len);
         }
 
         if (txt_n > 0)
@@ -918,6 +938,16 @@ void s2s_stop(void)
 
     // Wait for the task to exit
     xEventGroupWaitBits(s2s_ctx.event_group, S2S_TASK_STOPPED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+
+    // Drain the speaker ring buffer so any WS-task producer waiting on
+    // xRingbufferSend is released before we try to stop the WS client.
+    if (s2s_ctx.spk_ring_buffer)
+    {
+        size_t drain_size;
+        void* drain_item;
+        while ((drain_item = xRingbufferReceiveUpTo(s2s_ctx.spk_ring_buffer, &drain_size, 0, 4096)) != NULL)
+            vRingbufferReturnItem(s2s_ctx.spk_ring_buffer, drain_item);
+    }
 
     if (s2s_ctx.ws_client)
     {
