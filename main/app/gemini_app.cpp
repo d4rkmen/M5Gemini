@@ -41,6 +41,12 @@ static uint16_t s_anim_bg[ICON_SZ * ICON_SZ];
 static bool s_anim_bg_valid = false;
 #endif
 #define HINT_HEIGHT 12
+// Chat screen bottom row: battery icon on the left, key hints in the middle, status
+// icon on the right, all as tall as the hint text. The hints are centred on the
+// screen, so they are nudged right to sit midway between the two icons.
+#define CHAT_BATTERY_WIDTH 18
+#define CHAT_ICON_SIZE 11
+#define CHAT_HINT_X 4
 
 extern const uint8_t snap_wav_start[] asm("_binary_snap_wav_start");
 extern const uint8_t snap_wav_end[] asm("_binary_snap_wav_end");
@@ -459,12 +465,15 @@ void GeminiApp::update()
             break;
         }
 
+#if HAL_USE_BAT
+        updateBattery();
+#endif
         need_update |= drawResponseScreen();
-        need_update |= drawAnimation(need_update);
+        need_update |= drawAnimation(need_update, true);
         handleResponseScreenInput();
         need_update |= UTILS::HL_TEXT::hl_text_render(_hintTextContext,
                                                       getHintForState(),
-                                                      0,
+                                                      CHAT_HINT_X,
                                                       _hal->canvas()->height() - HINT_HEIGHT,
                                                       TFT_DARKGREY,
                                                       TFT_WHITE,
@@ -506,7 +515,7 @@ bool GeminiApp::drawMainScreen()
     _hal->canvas()->drawCenterString("v" BUILD_NUMBER, _hal->canvas()->width() / 2, offestY);
 
 #if HAL_USE_BAT
-    drawBattery();
+    drawBattery(4, 5, 22, 11, true);
 #endif
 
     is_rendered = true;
@@ -538,13 +547,12 @@ void GeminiApp::updateBattery()
     }
 }
 
-void GeminiApp::drawBattery()
+void GeminiApp::drawBattery(int x, int y, int w, int h, bool with_percent)
 {
     if (_batLevel < 0)
         return;
 
     auto* canvas = _hal->canvas();
-    const int x = 4, y = 5, w = 22, h = 11;
 
     canvas->drawRect(x, y, w, h, TFT_WHITE);
     canvas->fillRect(x + w, y + 3, 2, h - 6, TFT_WHITE);
@@ -563,14 +571,18 @@ void GeminiApp::drawBattery()
     {
         // lightning bolt over the bar
         int cx = x + w / 2;
-        canvas->fillTriangle(cx + 2, y + 1, cx - 3, y + 6, cx + 1, y + 6, TFT_WHITE);
-        canvas->fillTriangle(cx - 2, y + h - 2, cx + 3, y + 4, cx - 1, y + 4, TFT_WHITE);
+        int mid = y + h / 2;
+        canvas->fillTriangle(cx + 2, y + 1, cx - 3, mid + 1, cx + 1, mid + 1, TFT_WHITE);
+        canvas->fillTriangle(cx - 2, y + h - 2, cx + 3, mid - 1, cx - 1, mid - 1, TFT_WHITE);
     }
 
-    canvas->setFont(FONT_10);
-    canvas->setTextColor(TFT_LIGHTGREY);
-    canvas->drawString(std::format("{}%", _batLevel).c_str(), x + w + 6, y + 1);
-    canvas->setFont(FONT_16);
+    if (with_percent)
+    {
+        canvas->setFont(FONT_10);
+        canvas->setTextColor(TFT_LIGHTGREY);
+        canvas->drawString(std::format("{}%", _batLevel).c_str(), x + w + 6, y + 1);
+        canvas->setFont(FONT_16);
+    }
 }
 #endif
 
@@ -719,8 +731,13 @@ bool GeminiApp::drawResponseScreen()
         else if (_appState == APP_STATE_S2S_ERROR)
             status_text = "reconnecting...";
 
+        // centred in the area above the hint row, on the middle of the text rather than its top edge
         _hal->canvas()->setTextColor(TFT_DARKGRAY);
-        _hal->canvas()->drawCenterString(status_text, _hal->canvas()->width() / 2, _hal->canvas()->height() / 2, FONT_16);
+        _hal->canvas()->setFont(FONT_16);
+        _hal->canvas()->setTextDatum(middle_center);
+        _hal->canvas()->drawString(status_text, _hal->canvas()->width() / 2, (_hal->canvas()->height() - HINT_HEIGHT) / 2);
+        _hal->canvas()->setTextDatum(top_left);
+        _hal->canvas()->setFont(FONT_14);
     }
     else
     {
@@ -780,6 +797,10 @@ bool GeminiApp::drawResponseScreen()
             _hal->canvas()->fillRect(sx, tp, scrollbar_width, th, TFT_ORANGE);
         }
     }
+#if HAL_USE_BAT
+    // bottom-left corner, beside the key hints and as tall as their text
+    drawBattery(2, _hal->canvas()->height() - HINT_HEIGHT + 1, CHAT_BATTERY_WIDTH, 9, false);
+#endif
     is_rendered = true;
     return true;
 }
@@ -927,6 +948,87 @@ float easeInOutCirc(float t)
 }
 #endif
 
+// Status icons for the chat screen, drawn on an 11x11 grid. The 50x50 bitmaps used on
+// the main screen turn to mush when scaled this far down, so these are separate drawings.
+// `level` (0-255) dims the icon for the pulse.
+static uint32_t icon_color(uint32_t rgb, uint8_t level)
+{
+    return ((((rgb >> 16) & 0xFF) * level / 255) << 16) | ((((rgb >> 8) & 0xFF) * level / 255) << 8) |
+           ((rgb & 0xFF) * level / 255);
+}
+
+static void draw_wifi_arcs(LGFX_Sprite* c, int x, int y, uint32_t color)
+{
+    c->drawArc(x + 5, y + 10, 8, 8, 225, 315, color);
+    c->drawArc(x + 5, y + 10, 5, 5, 225, 315, color);
+    c->fillRect(x + 4, y + 8, 3, 2, color);
+}
+
+static void draw_status_icon(LGFX_Sprite* c, AppState state, int x, int y, uint8_t level)
+{
+    switch (state)
+    {
+    case APP_STATE_S2S_LISTENING:
+    {
+        // microphone
+        const uint32_t color = icon_color(0xFF5A5A, level);
+        c->fillRoundRect(x + 4, y, 3, 7, 1, color);
+        c->drawFastVLine(x + 2, y + 4, 3, color);
+        c->drawFastVLine(x + 8, y + 4, 3, color);
+        c->drawPixel(x + 3, y + 7, color);
+        c->drawPixel(x + 7, y + 7, color);
+        c->drawFastHLine(x + 4, y + 8, 3, color);
+        c->drawPixel(x + 5, y + 9, color);
+        c->drawFastHLine(x + 3, y + 10, 5, color);
+        break;
+    }
+    case APP_STATE_S2S_SPEAKING:
+    {
+        // loudspeaker with two sound waves
+        const uint32_t color = icon_color(0x4DB8FF, level);
+        c->fillRect(x, y + 4, 3, 3, color);
+        c->fillTriangle(x + 1, y + 5, x + 5, y + 1, x + 5, y + 9, color);
+        c->drawFastVLine(x + 7, y + 4, 3, color);
+        c->drawFastVLine(x + 9, y + 3, 5, color);
+        c->drawPixel(x + 8, y + 2, color);
+        c->drawPixel(x + 8, y + 8, color);
+        break;
+    }
+    case APP_STATE_CONNECTING_WIFI:
+        draw_wifi_arcs(c, x, y, icon_color(0xFFC000, level));
+        break;
+    case APP_STATE_DISCONNECTED:
+    {
+        // WiFi, struck through
+        draw_wifi_arcs(c, x, y, icon_color(0x909090, level));
+        const uint32_t color = icon_color(0xFF4040, level);
+        c->drawLine(x + 1, y + 10, x + 9, y + 1, color);
+        c->drawLine(x + 2, y + 10, x + 10, y + 1, color);
+        break;
+    }
+    case APP_STATE_S2S_CONNECTING:
+    {
+        // globe
+        const uint32_t color = icon_color(0x40D0FF, level);
+        c->drawCircle(x + 5, y + 5, 5, color);
+        c->drawEllipse(x + 5, y + 5, 2, 5, color);
+        c->drawFastHLine(x, y + 5, 11, color);
+        break;
+    }
+    case APP_STATE_S2S_ERROR:
+    {
+        // warning triangle
+        const uint32_t color = icon_color(0xFF4040, level);
+        c->drawTriangle(x + 5, y, x, y + 10, x + 10, y + 10, color);
+        c->drawFastVLine(x + 5, y + 4, 3, color);
+        c->drawPixel(x + 5, y + 8, color);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 void GeminiApp::setState(AppState state)
 {
     if (_appState == state)
@@ -939,7 +1041,7 @@ void GeminiApp::setState(AppState state)
 }
 
 // Draw the animation
-bool GeminiApp::drawAnimation(bool need_update)
+bool GeminiApp::drawAnimation(bool need_update, bool small)
 {
     const uint16_t* icon = nullptr;
     switch (_appState)
@@ -965,7 +1067,9 @@ bool GeminiApp::drawAnimation(bool need_update)
         icon = image_data_mic;
         break;
     }
-    if (icon)
+    if (small && !icon)
+        return false;
+    if (icon && !small)
         _sprite->pushImage(0, 0, 50, 50, icon);
 
     uint32_t timer_now = millis();
@@ -996,6 +1100,20 @@ bool GeminiApp::drawAnimation(bool need_update)
     if (alpha == _anim_context.last_alpha && need_update == false)
         return false;
     _anim_context.last_alpha = alpha;
+
+    if (small)
+    {
+        // Chat screen: a small icon in the bottom-right corner, beside the key hints.
+        // It pulses, but stays above a floor so that at this size it never disappears.
+        // Only its own square is redrawn, the rest of the screen is left alone.
+        const uint8_t level = 90 + (uint32_t)alpha * (255 - 90) / 255;
+        const int x = _hal->canvas()->width() - 3 - CHAT_ICON_SIZE;
+        const int y = _hal->canvas()->height() - HINT_HEIGHT;
+        _hal->canvas()->fillRect(x, y, CHAT_ICON_SIZE, CHAT_ICON_SIZE, THEME_COLOR_BG);
+        draw_status_icon(_hal->canvas(), _appState, x, y, level);
+        return true;
+    }
+
     // mixing sprite with background according to alpha
     for (int py = 0; py < _sprite->height(); py++)
     {

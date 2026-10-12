@@ -85,15 +85,15 @@ private:
     // Drawing
     bool drawMainScreen();
 #if HAL_USE_BAT
-    // Battery indicator on the main screen, sampled every few seconds
+    // Battery indicator on the main and chat screens, sampled every few seconds
     int _batLevel = -1;
     bool _batCharging = false;
     uint32_t _batNextCheck = 0;
     void updateBattery();
-    void drawBattery();
+    void drawBattery(int x, int y, int w, int h, bool with_percent);
 #endif
     void handleMainScreenInput();
-    bool drawAnimation(bool need_update);
+    bool drawAnimation(bool need_update, bool small = false);
     void handleSettingsMenu();
 
     bool drawResponseScreen();
