@@ -1,3 +1,11 @@
+v3.1
+
+- M5StickS3 support: two-button navigation, Web setup page for WiFi and API key, Power off menu entry
+- Up to 8 saved WiFi networks, the strongest one in range is used
+- Battery indicator on the main screen
+- Fixed words missing from Gemini's replies (audio and text) when a reply chunk was larger than the message buffer
+- Fixed build failing when the project path contains a space
+
 v2.5
 
 - Speach to text feature added using Deepgram API
