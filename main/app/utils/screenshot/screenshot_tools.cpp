@@ -28,6 +28,9 @@ namespace UTILS
     {
         bool take_screenshot(HAL::Hal* hal)
         {
+#if !HAL_USE_SDCARD
+            return false;
+#else
             ESP_LOGI(TAG, "Taking screenshot...");
             bool sdcard_mounted = hal->sdcard()->is_mounted();
 
@@ -195,6 +198,7 @@ namespace UTILS
             }
 
             return success;
+#endif
         }
 
         bool check_and_handle_screenshot(HAL::Hal* hal, bool* system_bar_force_update_flag)

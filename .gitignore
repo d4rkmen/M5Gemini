@@ -1,6 +1,7 @@
 .vscode
 .cache
 build
+build_*
 docs
 archive
 managed_components

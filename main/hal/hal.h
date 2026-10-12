@@ -210,7 +210,11 @@ namespace HAL
 #if HAL_USE_BAT
         virtual uint8_t getBatLevel(float voltage) { return 100; }
         virtual float getBatVoltage() { return 4.15; }
+        virtual bool isCharging() { return false; }
 #endif
+        // Speaker power amplifier enable, for boards that switch it separately from the codec
+        virtual void setSpeakerAmp(bool enabled) {}
+        virtual void powerOff() {}
         virtual void reboot() {}
     };
 } // namespace HAL

@@ -50,9 +50,17 @@ namespace SETTINGS
         std::function<void(SettingGroup_t& group)> callback;
     };
 
+    struct WifiNetwork_t
+    {
+        std::string ssid;
+        std::string pass;
+    };
+
     class Settings
     {
     public:
+        static constexpr size_t MAX_WIFI_NETWORKS = 8;
+
         Settings();
         ~Settings();
 
@@ -124,6 +132,21 @@ namespace SETTINGS
          * @return true if successful
          */
         bool setString(const std::string& ns, const std::string& key, const std::string& value);
+
+        /**
+         * @brief Get the saved WiFi networks
+         * @details The wifi/ssid + wifi/pass pair is always part of the list,
+         *          so a network entered through the settings menu is included
+         * @return Saved networks, at most MAX_WIFI_NETWORKS
+         */
+        std::vector<WifiNetwork_t> getWifiNetworks();
+
+        /**
+         * @brief Replace the saved WiFi networks
+         * @param networks Networks to store, truncated to MAX_WIFI_NETWORKS
+         * @return true if successful
+         */
+        bool setWifiNetworks(const std::vector<WifiNetwork_t>& networks);
 
         /**
          * @brief Save all modified settings to NVS

@@ -6,6 +6,9 @@
 #include "settings.h"
 #include "hal/hal.h"
 #include "app/utils/ui/dialog.h"
+#ifdef CONFIG_BOARD_STICKS3
+#include "app/utils/web/web_setup.h"
+#endif
 #include "common_define.h"
 #include <format>
 #include <fstream>
@@ -15,6 +18,9 @@
 
 static const char* TAG = "SETTINGS";
 static const std::string SETTINGS_FILE_NAME = "/sdcard/settings.txt";
+static const char* WIFI_NETWORKS_KEY = "nets";
+static const char WIFI_FIELD_SEP = '\x1f';
+static const char WIFI_RECORD_SEP = '\x1e';
 
 namespace SETTINGS
 {
@@ -94,7 +100,11 @@ namespace SETTINGS
             {"rules",
              "Rules",
              TYPE_STRING,
+#ifdef CONFIG_BOARD_STICKS3
+             "you are conversational AI assistant running on M5 StickS3."
+#else
              "you are conversational AI assistant running on M5 CardPuter."
+#endif
              "give short direct and a quite funny answer. start your answer with something "
              "like: 'yes, master', 'your wish is my command' and so on. reply in user's language",
              "",
@@ -103,6 +113,7 @@ namespace SETTINGS
              "System instructions for the model"},
         };
 
+#if HAL_USE_SDCARD
         SettingGroup_t export_group;
         export_group.name = "Export (SD card)";
         export_group.items = {};
@@ -161,6 +172,32 @@ namespace SETTINGS
         };
 
         _metadata = {wifi_group, sys_group, gemini_group, export_group, import_group};
+#else
+        _metadata = {wifi_group, sys_group, gemini_group};
+#endif
+
+#ifdef CONFIG_BOARD_STICKS3
+        // No keyboard: text settings are edited from a phone or PC browser
+        SettingGroup_t web_group;
+        web_group.name = "Web setup";
+        web_group.items = {};
+        web_group.callback = [this](SETTINGS::SettingGroup_t& group)
+        {
+            if (_hal)
+                UTILS::WEB_SETUP::run(_hal);
+        };
+        _metadata.push_back(web_group);
+
+        SettingGroup_t power_group;
+        power_group.name = "Power off";
+        power_group.items = {};
+        power_group.callback = [this](SETTINGS::SettingGroup_t& group)
+        {
+            if (_hal && UTILS::UI::show_confirmation_dialog(_hal, "Power off", "Turn the device off?"))
+                _hal->powerOff();
+        };
+        _metadata.push_back(power_group);
+#endif
     }
 
     void Settings::setHal(HAL::Hal* hal) { _hal = hal; }
@@ -443,6 +480,82 @@ namespace SETTINGS
         }
 
         err = nvs_set_str(nvs_handle, key.c_str(), value.c_str());
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+
+        return err == ESP_OK;
+    }
+
+    std::vector<WifiNetwork_t> Settings::getWifiNetworks()
+    {
+        std::vector<WifiNetwork_t> networks;
+
+        // stored as "ssid<US>pass<RS>" records
+        std::string raw;
+        nvs_handle_t nvs_handle;
+        if (_active_partition && nvs_open_from_partition(_active_partition, "wifi", NVS_READONLY, &nvs_handle) == ESP_OK)
+        {
+            size_t required_size = 0;
+            if (nvs_get_str(nvs_handle, WIFI_NETWORKS_KEY, nullptr, &required_size) == ESP_OK && required_size > 1)
+            {
+                std::vector<char> value(required_size);
+                if (nvs_get_str(nvs_handle, WIFI_NETWORKS_KEY, value.data(), &required_size) == ESP_OK)
+                    raw = value.data();
+            }
+            nvs_close(nvs_handle);
+        }
+
+        size_t pos = 0;
+        while (pos < raw.size() && networks.size() < MAX_WIFI_NETWORKS)
+        {
+            size_t end = raw.find(WIFI_RECORD_SEP, pos);
+            if (end == std::string::npos)
+                end = raw.size();
+            std::string record = raw.substr(pos, end - pos);
+            pos = end + 1;
+
+            size_t sep = record.find(WIFI_FIELD_SEP);
+            if (sep == std::string::npos || sep == 0)
+                continue;
+            networks.push_back({record.substr(0, sep), record.substr(sep + 1)});
+        }
+
+        std::string ssid = getString("wifi", "ssid");
+        if (!ssid.empty())
+        {
+            bool known = false;
+            for (const auto& network : networks)
+                known |= (network.ssid == ssid);
+            if (!known)
+            {
+                if (networks.size() >= MAX_WIFI_NETWORKS)
+                    networks.pop_back();
+                networks.insert(networks.begin(), {ssid, getString("wifi", "pass")});
+            }
+        }
+        return networks;
+    }
+
+    bool Settings::setWifiNetworks(const std::vector<WifiNetwork_t>& networks)
+    {
+        std::string raw;
+        size_t count = 0;
+        for (const auto& network : networks)
+        {
+            if (network.ssid.empty() || count >= MAX_WIFI_NETWORKS)
+                continue;
+            raw += network.ssid + WIFI_FIELD_SEP + network.pass + WIFI_RECORD_SEP;
+            count++;
+        }
+
+        nvs_handle_t nvs_handle;
+        esp_err_t err = nvs_open_from_partition(_active_partition, "wifi", NVS_READWRITE, &nvs_handle);
+        if (err != ESP_OK)
+        {
+            return false;
+        }
+
+        err = nvs_set_str(nvs_handle, WIFI_NETWORKS_KEY, raw.c_str());
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
 

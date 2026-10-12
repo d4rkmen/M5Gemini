@@ -45,12 +45,17 @@ namespace HAL
             {
             case WIFI_EVENT_STA_START:
                 ESP_LOGD(TAG, "WiFi station started, connecting");
-                esp_wifi_connect();
-                s_wifi_instance->_status = WIFI_STATUS_CONNECTING;
+                s_wifi_instance->_retry_count = 0;
+                s_wifi_instance->_begin_connect();
+                break;
+
+            case WIFI_EVENT_SCAN_DONE:
+                s_wifi_instance->_handle_scan_done();
                 break;
 
             case WIFI_EVENT_STA_CONNECTED:
                 ESP_LOGI(TAG, "WiFi connected");
+                s_wifi_instance->_retry_count = 0;
                 s_wifi_instance->_status = WIFI_STATUS_CONNECTED_WEAK;
                 // Status will be updated based on RSSI in update()
                 break;
@@ -65,9 +70,19 @@ namespace HAL
                 // Try to reconnect if enabled
                 if (s_wifi_instance->_settings->getBool("wifi", "enabled"))
                 {
-                    ESP_LOGI(TAG, "WiFi reconnecting...");
-                    esp_wifi_connect();
-                    s_wifi_instance->_status = WIFI_STATUS_CONNECTING;
+                    if (s_wifi_instance->_networks.size() > 1 && ++s_wifi_instance->_retry_count >= CONNECT_RETRIES)
+                    {
+                        // this network keeps failing, look for another saved one
+                        ESP_LOGI(TAG, "WiFi looking for another saved network...");
+                        s_wifi_instance->_retry_count = 0;
+                        s_wifi_instance->_begin_connect();
+                    }
+                    else
+                    {
+                        ESP_LOGI(TAG, "WiFi reconnecting...");
+                        esp_wifi_connect();
+                        s_wifi_instance->_status = WIFI_STATUS_CONNECTING;
+                    }
                 }
                 break;
             }
@@ -82,6 +97,16 @@ namespace HAL
                 s_wifi_instance->_settings->setString("wifi", "ip", ip4addr_ntoa((ip4_addr_t*)&event->ip_info.ip));
                 s_wifi_instance->_settings->setString("wifi", "mask", ip4addr_ntoa((ip4_addr_t*)&event->ip_info.netmask));
                 s_wifi_instance->_settings->setString("wifi", "gateway", ip4addr_ntoa((ip4_addr_t*)&event->ip_info.gw));
+                // show the network we ended up on in the settings menu
+                if (s_wifi_instance->_current_network < (int)s_wifi_instance->_networks.size())
+                {
+                    const auto& network = s_wifi_instance->_networks[s_wifi_instance->_current_network];
+                    if (s_wifi_instance->_settings->getString("wifi", "ssid") != network.ssid)
+                    {
+                        s_wifi_instance->_settings->setString("wifi", "ssid", network.ssid);
+                        s_wifi_instance->_settings->setString("wifi", "pass", network.pass);
+                    }
+                }
                 // Update status based on RSSI
                 s_wifi_instance->_update_status_from_rssi();
                 if (s_wifi_instance->_status_callback)
@@ -104,18 +129,27 @@ namespace HAL
             ESP_LOGD(TAG, "WiFi is disabled by settings");
             return true;
         }
-        _wifi_settings.ssid = _settings->getString("wifi", "ssid");
-        _wifi_settings.password = _settings->getString("wifi", "pass");
+        _networks = _settings->getWifiNetworks();
+        _current_network = 0;
+        _retry_count = 0;
+        _auto_scan = false;
+        if (!_networks.empty())
+        {
+            _wifi_settings.ssid = _networks[0].ssid;
+            _wifi_settings.password = _networks[0].pass;
+        }
+        else
+        {
+            _wifi_settings.ssid.clear();
+            _wifi_settings.password.clear();
+        }
         _wifi_settings.static_ip = _settings->getBool("wifi", "static_ip");
         _wifi_settings.ip = _settings->getString("wifi", "ip");
         _wifi_settings.mask = _settings->getString("wifi", "mask");
         _wifi_settings.gateway = _settings->getString("wifi", "gateway");
         _wifi_settings.dns = _settings->getString("wifi", "dns");
 
-        ESP_LOGI(TAG,
-                 "Initializing WiFi with SSID: %s, password: %s",
-                 _wifi_settings.ssid.c_str(),
-                 _wifi_settings.password.c_str());
+        ESP_LOGI(TAG, "Initializing WiFi with %d saved network(s), first SSID: %s", (int)_networks.size(), _wifi_settings.ssid.c_str());
 
         // Initialize TCP/IP adapter
         esp_err_t err = esp_netif_init();
@@ -206,16 +240,128 @@ namespace HAL
             return false;
         }
 
+        if (_rescan_timer == nullptr)
+        {
+            esp_timer_create_args_t timer_args = {};
+            timer_args.callback = [](void* arg) { static_cast<WiFi*>(arg)->_begin_connect(); };
+            timer_args.arg = this;
+            timer_args.name = "wifi_rescan";
+            esp_timer_create(&timer_args, &_rescan_timer);
+        }
+
         _initialized = true;
         _status = WIFI_STATUS_DISCONNECTED;
 
         return true;
     }
 
+    void WiFi::_set_status(wifi_status_t status)
+    {
+        _status = status;
+        if (_status_callback)
+        {
+            _status_callback(_status);
+        }
+    }
+
+    void WiFi::_connect_to(int index)
+    {
+        if (index < 0 || index >= (int)_networks.size())
+            return;
+
+        _current_network = index;
+        const auto& network = _networks[index];
+
+        wifi_config_t wifi_config = {};
+        strncpy((char*)wifi_config.sta.ssid, network.ssid.c_str(), sizeof(wifi_config.sta.ssid) - 1);
+        strncpy((char*)wifi_config.sta.password, network.pass.c_str(), sizeof(wifi_config.sta.password) - 1);
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+
+        ESP_LOGI(TAG, "Connecting to %s", network.ssid.c_str());
+        _status = WIFI_STATUS_CONNECTING;
+        esp_wifi_connect();
+    }
+
+    void WiFi::_begin_connect()
+    {
+        if (!_initialized || _ap_active || _networks.empty() || is_connected())
+            return;
+
+        if (_networks.size() == 1)
+        {
+            // nothing to choose from, and a direct connect also reaches a hidden SSID
+            _connect_to(0);
+            return;
+        }
+
+        _auto_scan = true;
+        _status = WIFI_STATUS_CONNECTING;
+        if (esp_wifi_scan_start(nullptr, false) != ESP_OK)
+        {
+            _auto_scan = false;
+            _connect_to(_current_network);
+        }
+    }
+
+    void WiFi::_handle_scan_done()
+    {
+        // scan() blocks and collects its own results
+        if (!_auto_scan)
+            return;
+        _auto_scan = false;
+
+        uint16_t ap_count = 20;
+        wifi_ap_record_t* ap_records = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * ap_count);
+        if (!ap_records || esp_wifi_scan_get_ap_records(&ap_count, ap_records) != ESP_OK)
+        {
+            free(ap_records);
+            esp_wifi_clear_ap_list();
+            _connect_to(_current_network);
+            return;
+        }
+
+        int best = -1;
+        int best_rssi = -128;
+        for (int i = 0; i < ap_count; i++)
+        {
+            for (int n = 0; n < (int)_networks.size(); n++)
+            {
+                if (_networks[n].ssid == (const char*)ap_records[i].ssid && ap_records[i].rssi > best_rssi)
+                {
+                    best = n;
+                    best_rssi = ap_records[i].rssi;
+                }
+            }
+        }
+        free(ap_records);
+
+        if (best >= 0)
+        {
+            _connect_to(best);
+            return;
+        }
+
+        ESP_LOGI(TAG, "No saved network in range, retrying later");
+        _set_status(WIFI_STATUS_DISCONNECTED);
+        if (_rescan_timer)
+        {
+            esp_timer_stop(_rescan_timer);
+            esp_timer_start_once(_rescan_timer, RESCAN_DELAY_US);
+        }
+    }
+
     void WiFi::deinit()
     {
         if (!_initialized)
             return;
+
+        if (_rescan_timer)
+        {
+            esp_timer_stop(_rescan_timer);
+            esp_timer_delete(_rescan_timer);
+            _rescan_timer = nullptr;
+        }
+        _auto_scan = false;
 
         disconnect();
 
@@ -376,7 +522,8 @@ namespace HAL
         wifi_ap_record_t* ap_records = nullptr;
 
         // If WiFi is not initialized, perform temporary initialization
-        if (!_initialized)
+        // (in access point mode the driver is already running)
+        if (!_initialized && !_ap_active)
         {
             ESP_LOGI(TAG, "Performing temporary WiFi initialization for scanning");
 
@@ -520,6 +667,91 @@ namespace HAL
         }
 
         return networks;
+    }
+
+    bool WiFi::start_ap(const std::string& ssid, const std::string& password)
+    {
+#ifndef CONFIG_ESP_WIFI_SOFTAP_SUPPORT
+        ESP_LOGE(TAG, "Access point support is disabled (CONFIG_ESP_WIFI_SOFTAP_SUPPORT)");
+        return false;
+#else
+        if (_ap_active)
+            return true;
+        if (_initialized)
+            deinit();
+
+        if (esp_netif_init() != ESP_OK || esp_event_loop_create_default() != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Failed to initialize TCP/IP for access point");
+            return false;
+        }
+
+        _ap_netif = esp_netif_create_default_wifi_ap();
+        _sta_netif = esp_netif_create_default_wifi_sta();
+
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        esp_err_t err = esp_wifi_init(&cfg);
+        if (err == ESP_OK)
+        {
+            wifi_config_t ap_config = {};
+            strncpy((char*)ap_config.ap.ssid, ssid.c_str(), sizeof(ap_config.ap.ssid) - 1);
+            strncpy((char*)ap_config.ap.password, password.c_str(), sizeof(ap_config.ap.password) - 1);
+            ap_config.ap.ssid_len = strlen((char*)ap_config.ap.ssid);
+            ap_config.ap.channel = 1;
+            ap_config.ap.max_connection = 2;
+            ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+            // APSTA rather than AP: the station side is what lets us scan
+            err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+            if (err == ESP_OK)
+                err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+            if (err == ESP_OK)
+                err = esp_wifi_start();
+            if (err != ESP_OK)
+                esp_wifi_deinit();
+        }
+
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Failed to start access point: %s", esp_err_to_name(err));
+            esp_netif_destroy_default_wifi(_ap_netif);
+            esp_netif_destroy_default_wifi(_sta_netif);
+            _ap_netif = nullptr;
+            _sta_netif = nullptr;
+            esp_event_loop_delete_default();
+            return false;
+        }
+
+        _ap_active = true;
+        ESP_LOGI(TAG, "Access point %s started", ssid.c_str());
+        return true;
+#endif
+    }
+
+    void WiFi::stop_ap()
+    {
+        if (!_ap_active)
+            return;
+
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        esp_netif_destroy_default_wifi(_ap_netif);
+        esp_netif_destroy_default_wifi(_sta_netif);
+        _ap_netif = nullptr;
+        _sta_netif = nullptr;
+        esp_event_loop_delete_default();
+        _ap_active = false;
+        ESP_LOGI(TAG, "Access point stopped");
+    }
+
+    std::string WiFi::get_ip() const
+    {
+        esp_netif_ip_info_t ip_info;
+        if (!_initialized || !is_connected() || !_sta_netif || esp_netif_get_ip_info(_sta_netif, &ip_info) != ESP_OK)
+            return "";
+        char buf[16];
+        snprintf(buf, sizeof(buf), IPSTR, IP2STR(&ip_info.ip));
+        return buf;
     }
 
 } // namespace HAL

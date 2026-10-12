@@ -3,7 +3,12 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
+#ifdef CONFIG_BOARD_STICKS3
+#include "hal/hal_sticks3.h"
+#else
 #include "hal/hal_cardputer.h"
+#endif
 #include "app/gemini_app.h"
 
 static const char* TAG = "M5Gemini";
@@ -12,7 +17,11 @@ using namespace HAL;
 using namespace SETTINGS;
 
 Settings settings;
+#ifdef CONFIG_BOARD_STICKS3
+HalStickS3 hal(&settings);
+#else
 HalCardputer hal(&settings);
+#endif
 
 extern "C" void app_main(void)
 {

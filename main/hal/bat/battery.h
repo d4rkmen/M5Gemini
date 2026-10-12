@@ -60,6 +60,6 @@ namespace HAL
          * @param voltage Voltage in volts
          * @return Battery level (0, 25, 50, 75, or 100)
          */
-        uint8_t get_level(float voltage);
+        static uint8_t get_level(float voltage);
     };
 } // namespace HAL

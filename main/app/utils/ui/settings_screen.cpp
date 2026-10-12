@@ -12,7 +12,11 @@
 #include "common_define.h"
 
 static const char* TAG = "SETTINGS_SCREEN";
+#ifdef CONFIG_BOARD_STICKS3
+static const char* HINT_ITEMS = "[A] OK [B] DOWN [A hold] UP [B hold] BACK";
+#else
 static const char* HINT_ITEMS = "[\xE2\x86\x91][\xE2\x86\x93][\xE2\x86\x90][\xE2\x86\x92] [ESC] [ENTER]";
+#endif
 static const char* HINT_GROUPS = HINT_ITEMS;
 
 // Scroll constants
@@ -535,6 +539,26 @@ namespace UTILS
                     int min_value = item.min_val.empty() ? 0 : std::stoi(item.min_val);
                     int max_value = item.max_val.empty() ? 999 : std::stoi(item.max_val);
 
+#ifdef CONFIG_BOARD_STICKS3
+                    // no digit keys: pick from evenly spaced steps, exact values go through Web setup
+                    const int steps = 10;
+                    std::vector<std::string> options;
+                    int current_index = 0;
+                    for (int i = 0; i <= steps; i++)
+                    {
+                        int option = min_value + (max_value - min_value) * i / steps;
+                        if (option <= value)
+                            current_index = i;
+                        options.push_back(std::to_string(option));
+                    }
+                    int res = UTILS::UI::show_select_dialog(hal, item.label, options, current_index);
+                    if (res != -1)
+                    {
+                        item.value = options[res];
+                        value_changed = true;
+                    }
+                    break;
+#endif
                     if (UTILS::UI::show_edit_number_dialog(hal, item.label, value, min_value, max_value))
                     {
                         item.value = std::to_string(value);
@@ -572,6 +596,13 @@ namespace UTILS
                             value_changed = true;
                         }
                     }
+#ifdef CONFIG_BOARD_STICKS3
+                    else if (true)
+                    {
+                        // no keyboard to type with
+                        UTILS::UI::show_message_dialog(hal, item.label, "Use Web setup to edit", 0);
+                    }
+#endif
 #if HAL_USE_WIFI
                     else if (group.nvs_namespace == "wifi" && item.key == "ssid" && !hal->keyboard()->keysState().fn)
                     {

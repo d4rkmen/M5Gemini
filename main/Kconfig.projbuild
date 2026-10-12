@@ -1,5 +1,19 @@
 menu "HAL Configuration"
 
+    choice BOARD
+        prompt "Target board"
+        default BOARD_CARDPUTER
+
+        config BOARD_CARDPUTER
+            bool "M5Cardputer / M5Cardputer ADV"
+
+        config BOARD_STICKS3
+            bool "M5StickS3"
+            help
+                Two buttons instead of a keyboard, no SD card and no RGB LED.
+                Disable "Enable SD card" and "Enable RGB LED" for this board.
+    endchoice
+
     config HAL_USE_I2C
         bool "Enable I2C master"
         default y

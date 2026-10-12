@@ -34,7 +34,7 @@ namespace HAL
             return false;
         }
 
-        if (_board_type == BoardType::CARDPUTER_ADV)
+        if (board_has_es8311(_board_type))
         {
             if (!_hal->es8311() || !_hal->es8311()->speaker_enable())
             {
@@ -114,7 +114,7 @@ namespace HAL
             _tx_chan = nullptr;
         }
 
-        if (_board_type == BoardType::CARDPUTER_ADV && _hal->es8311())
+        if (board_has_es8311(_board_type) && _hal->es8311())
         {
             _hal->es8311()->speaker_disable();
         }
@@ -682,8 +682,9 @@ namespace HAL
             i2s_channel_write(self->_tx_chan, self->mix_buf, buffer_size * sizeof(int16_t), &bytes_written, pdMS_TO_TICKS(100));
         }
 
-        if (self->_board_type == BoardType::CARDPUTER_ADV && self->_hal->es8311())
+        if (board_has_es8311(self->_board_type) && self->_hal->es8311())
             self->_hal->es8311()->speaker_unmute();
+        self->_hal->setSpeakerAmp(true);
 
         uint8_t buf_cnt = 0;
         bool flg_nodata = false;
@@ -771,7 +772,8 @@ namespace HAL
             }
         }
 
-        if (self->_board_type == BoardType::CARDPUTER_ADV && self->_hal->es8311())
+        self->_hal->setSpeakerAmp(false);
+        if (board_has_es8311(self->_board_type) && self->_hal->es8311())
             self->_hal->es8311()->speaker_mute();
 
         memset(self->mix_buf, 0, buffer_size * sizeof(int32_t));

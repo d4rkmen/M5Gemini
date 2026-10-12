@@ -15,7 +15,7 @@ file(GLOB_RECURSE SETTINGS_SRCS
 
 idf_component_register(SRCS "main.cpp" ${APP_SRCS} ${HAL_SRCS} ${SETTINGS_SRCS}
                     INCLUDE_DIRS "." "./hal"
-                    REQUIRES LovyanGFX nvs_flash esp_wifi esp_adc driver fatfs mbedtls mjson
+                    REQUIRES LovyanGFX nvs_flash esp_wifi esp_adc driver fatfs mbedtls mjson esp_http_server
                     EMBED_FILES sound/error.wav sound/snap.wav
                     WHOLE_ARCHIVE)
                     

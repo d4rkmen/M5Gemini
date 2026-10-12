@@ -18,13 +18,19 @@
 #include "assets/anm_playing3.h"
 #include "assets/anm_mic.h"
 
-#include "hal_cardputer.h"
+#include "hal.h"
+#include "common_define.h"
 #include "wifi/wifi.h"
 
 static const char* TAG = "GEMINI_APP";
 static const char* GEMINI_NS = "gemini";
+#ifdef CONFIG_BOARD_STICKS3
+static const char* HINT_MAIN = "[A] START [B hold] SETTINGS";
+static const char* API_KEY_HINT = "[A] [B hold]";
+#else
 static const char* HINT_MAIN = "[ENTER] START [ESC] SETTINGS";
 static const char* API_KEY_HINT = "[ENTER] [ESC]";
+#endif
 
 static bool is_repeat = false;
 static uint32_t next_fire_ts = 0xFFFFFFFF;
@@ -215,6 +221,20 @@ void GeminiApp::init()
 
 const char* GeminiApp::getHintForState() const
 {
+#ifdef CONFIG_BOARD_STICKS3
+    switch (_appState)
+    {
+    case APP_STATE_S2S_LISTENING:
+        return "[A] SEND [B] SCROLL [B hold] STOP";
+    case APP_STATE_S2S_SPEAKING:
+        return "[A] SKIP [B] SCROLL [B hold] STOP";
+    case APP_STATE_S2S_CONNECTING:
+    case APP_STATE_S2S_ERROR:
+        return "[B hold] CANCEL";
+    default:
+        return "[B] [A hold] SCROLL [B hold] BACK";
+    }
+#endif
     switch (_appState)
     {
     case APP_STATE_S2S_LISTENING:
@@ -241,6 +261,9 @@ void GeminiApp::update()
     switch (_currentScreen)
     {
     case SCREEN_START:
+#if HAL_USE_BAT
+        updateBattery();
+#endif
         need_update |= drawMainScreen();
         need_update |= drawAnimation(need_update);
         handleMainScreenInput();
@@ -480,9 +503,69 @@ bool GeminiApp::drawMainScreen()
     _hal->canvas()->setTextColor(TFT_WHITE);
     _hal->canvas()->drawCenterString("v" BUILD_NUMBER, _hal->canvas()->width() / 2, offestY);
 
+#if HAL_USE_BAT
+    drawBattery();
+#endif
+
     is_rendered = true;
     return true;
 }
+
+#if HAL_USE_BAT
+#define BATTERY_CHECK_INTERVAL_MS 5000
+
+void GeminiApp::updateBattery()
+{
+    uint32_t now = millis();
+    if (_batLevel >= 0 && now < _batNextCheck)
+        return;
+    _batNextCheck = now + BATTERY_CHECK_INTERVAL_MS;
+
+    float voltage = _hal->getBatVoltage();
+    // a failed read comes back as 0 V: keep the last good value
+    if (voltage < 1.0f)
+        return;
+    int level = _hal->getBatLevel(voltage);
+    bool charging = _hal->isCharging();
+    if (level != _batLevel || charging != _batCharging)
+    {
+        _batLevel = level;
+        _batCharging = charging;
+        is_rendered = false;
+    }
+}
+
+void GeminiApp::drawBattery()
+{
+    if (_batLevel < 0)
+        return;
+
+    auto* canvas = _hal->canvas();
+    const int x = 4, y = 5, w = 22, h = 11;
+
+    canvas->drawRect(x, y, w, h, TFT_WHITE);
+    canvas->fillRect(x + w, y + 3, 2, h - 6, TFT_WHITE);
+
+    uint32_t color = _batLevel > 50 ? TFT_GREEN : _batLevel > 20 ? TFT_YELLOW : TFT_RED;
+    int fill = (w - 4) * _batLevel / 100;
+    if (fill < 1)
+        fill = 1;
+    canvas->fillRect(x + 2, y + 2, fill, h - 4, color);
+
+    if (_batCharging)
+    {
+        // lightning bolt over the bar
+        int cx = x + w / 2;
+        canvas->fillTriangle(cx + 2, y + 1, cx - 3, y + 6, cx + 1, y + 6, TFT_WHITE);
+        canvas->fillTriangle(cx - 2, y + h - 2, cx + 3, y + 4, cx - 1, y + 4, TFT_WHITE);
+    }
+
+    canvas->setFont(FONT_10);
+    canvas->setTextColor(TFT_LIGHTGREY);
+    canvas->drawString(std::format("{}%", _batLevel).c_str(), x + w + 6, y + 1);
+    canvas->setFont(FONT_16);
+}
+#endif
 
 void GeminiApp::handleMainScreenInput()
 {

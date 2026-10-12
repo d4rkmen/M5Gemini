@@ -203,7 +203,7 @@ namespace HAL
             _task_semaphore = xSemaphoreCreateBinary();
         }
 
-        if (_board_type == BoardType::CARDPUTER_ADV && _hal->es8311())
+        if (board_has_es8311(_board_type) && _hal->es8311())
         {
             _hal->es8311()->mic_enable();
         }
@@ -252,7 +252,7 @@ namespace HAL
             } while (_task_handle);
         }
 
-        if (_board_type == BoardType::CARDPUTER_ADV && _hal->es8311())
+        if (board_has_es8311(_board_type) && _hal->es8311())
         {
             _hal->es8311()->mic_disable();
         }

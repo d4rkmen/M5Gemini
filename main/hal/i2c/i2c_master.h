@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sdkconfig.h"
 #include "esp_err.h"
 #include "driver/i2c_master.h"
 #include <stdint.h>
@@ -17,9 +18,15 @@
 // ============================================================================
 namespace I2CConfig
 {
+#ifdef CONFIG_BOARD_STICKS3
+    // M5StickS3 internal bus: ES8311, BMI270, M5PM1
+    constexpr int PIN_SDA = 47;
+    constexpr int PIN_SCL = 48;
+#else
     // GPIO pins (from old I2C_Driver)
     constexpr int PIN_SDA = 8;
     constexpr int PIN_SCL = 9;
+#endif
 
     // Bus configuration
     constexpr int BUS_NUM = I2C_NUM_1;     // I2C_NUM_1

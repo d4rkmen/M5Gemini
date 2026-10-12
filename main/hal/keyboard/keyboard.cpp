@@ -11,6 +11,8 @@
 #include "keyboard.h"
 #include "keyboard_reader_iomatrix.h"
 #include "keyboard_reader_tca8418.h"
+#include "keyboard_reader_buttons.h"
+#include "sdkconfig.h"
 #include <driver/gpio.h>
 #include "common_define.h"
 #include "esp_log.h"
@@ -21,6 +23,15 @@ using namespace KEYBOARD;
 
 void Keyboard::init()
 {
+#ifdef CONFIG_BOARD_STICKS3
+    // No keyboard on this board: the two buttons stand in for the navigation keys
+    ESP_LOGI(TAG, "Board type STICK_S3 - using buttons");
+    _board_type = HAL::BoardType::STICK_S3;
+    _keyboard_reader = std::make_unique<ButtonsKeyboardReader>();
+    _keyboard_reader->init();
+    _last_pressed_time = millis();
+    return;
+#endif
     // Detect board type if set to AUTO_DETECT
     if (_board_type == HAL::BoardType::AUTO_DETECT)
     {
