@@ -35,4 +35,8 @@ endif()
 
 message(STATUS "LovyanGFX use components = ${COMPONENT_REQUIRES}")
 
-register_component()
+# Not register_component(): it splits COMPONENT_* variables on spaces, which
+# breaks when the project path contains one.
+idf_component_register(SRCS ${SRCS}
+                       INCLUDE_DIRS "${LGFX_ROOT}/src"
+                       REQUIRES ${COMPONENT_REQUIRES})
