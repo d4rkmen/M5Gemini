@@ -231,6 +231,13 @@ namespace
             break;
 
         case SETTINGS::TYPE_NUMBER:
+            if (item.percent)
+            {
+                page += "<label>" + label + " (%)<input type=number name=" + name + " min=0 max=100 value=" +
+                        std::to_string(SETTINGS::number_to_percent(item, settings->getNumber(group.nvs_namespace, item.key))) +
+                        "></label>";
+                break;
+            }
             page += "<label>" + label + "<input type=number name=" + name + " min=" + html_escape(item.min_val) +
                     " max=" + html_escape(item.max_val) +
                     " value=" + std::to_string(settings->getNumber(group.nvs_namespace, item.key)) + "></label>";
@@ -383,6 +390,8 @@ namespace
                     if (!present || trim(value).empty())
                         break;
                     int number = atoi(value.c_str());
+                    if (item.percent)
+                        number = SETTINGS::percent_to_number(item, number);
                     if (!item.min_val.empty())
                         number = std::max(number, atoi(item.min_val.c_str()));
                     if (!item.max_val.empty())

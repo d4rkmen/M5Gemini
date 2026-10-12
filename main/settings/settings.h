@@ -40,7 +40,31 @@ namespace SETTINGS
         std::string max_val; // For TYPE_NUMBER
         std::string hint;
         std::function<void(SettingItem_t& item)> callback;
+        // TYPE_NUMBER shown and edited as 0-100%, stored in its own min_val..max_val range
+        bool percent = false;
     };
+
+    inline int number_to_percent(const SettingItem_t& item, int number)
+    {
+        const int min_value = item.min_val.empty() ? 0 : std::stoi(item.min_val);
+        const int max_value = item.max_val.empty() ? 100 : std::stoi(item.max_val);
+        if (max_value <= min_value || number <= min_value)
+            return 0;
+        if (number >= max_value)
+            return 100;
+        return ((number - min_value) * 100 + (max_value - min_value) / 2) / (max_value - min_value);
+    }
+
+    inline int percent_to_number(const SettingItem_t& item, int percent)
+    {
+        const int min_value = item.min_val.empty() ? 0 : std::stoi(item.min_val);
+        const int max_value = item.max_val.empty() ? 100 : std::stoi(item.max_val);
+        if (percent <= 0)
+            return min_value;
+        if (percent >= 100)
+            return max_value;
+        return min_value + ((max_value - min_value) * percent + 50) / 100;
+    }
 
     struct SettingGroup_t
     {

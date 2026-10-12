@@ -44,7 +44,11 @@ namespace SETTINGS
              "",
              "",
              "",
+#ifdef CONFIG_BOARD_STICKS3
+             "WiFi network in use. Add or remove networks in Web setup"},
+#else
              "WiFi network name (SSID) to connect to. Hold [Fn] key to enter SSID manually"},
+#endif
             {"pass", "Password", TYPE_STRING, "", "", "", "", "WiFi network security password"},
             {"static_ip", "Static IP", TYPE_BOOL, "false", "false", "", "", "Use static IP address or let DHCP assign it"},
             {"ip", "IP addr", TYPE_STRING, "", "", "", "", "Static IP address to use or last DHCP assigned address"},
@@ -57,7 +61,8 @@ namespace SETTINGS
         sys_group.nvs_namespace = "system";
         sys_group.items = {
             back_item,
-            {"brightness", "Brightness", TYPE_NUMBER, "100", "100", "10", "255", "Screen brightness level (10-255)"},
+            // brightness and volumes keep their stored ranges (shared with other M5Apps) and are shown as percentages
+            {"brightness", "Brightness", TYPE_NUMBER, "100", "100", "10", "255", "Screen brightness (0-100%)", nullptr, true},
             {"volume",
              "Volume",
              TYPE_NUMBER,
@@ -65,12 +70,13 @@ namespace SETTINGS
              "64",
              "0",
              "255",
-             "System sound volume level (0-255)",
+             "System sound volume (0-100%)",
              [this](SettingItem_t& item)
              {
                  if (_hal && _hal->speaker())
                      _hal->speaker()->setVolume(std::stoi(item.value));
-             }},
+             },
+             true},
             {"boot_sound", "Boot sound", TYPE_BOOL, "true", "true", "", "", "Play boot sound on startup"},
         };
 
@@ -87,7 +93,11 @@ namespace SETTINGS
              "",
              "gemini-3.1-flash-live-preview;gemini-2.5-flash-native-audio-preview-12-2025",
              "100",
+#ifdef CONFIG_BOARD_STICKS3
+             "Model name. Live models for S2S voice mode. Enter a custom one in Web setup"},
+#else
              "Model name. Live models for S2S voice mode. Hold [Fn] to enter custom"},
+#endif
             {"voice",
              "Voice",
              TYPE_STRING,
@@ -95,8 +105,12 @@ namespace SETTINGS
              "",
              "Kore;Puck;Charon;Fenrir;Aoede;Leda;Orus;Vesta;Zephyr",
              "",
+#ifdef CONFIG_BOARD_STICKS3
+             "Voice for speech-to-speech mode"},
+#else
              "Voice for speech-to-speech mode. Hold [Fn] to enter custom"},
-            {"volume", "S2S Volume", TYPE_NUMBER, "255", "255", "0", "255", "Speech volume for S2S mode (0-255)"},
+#endif
+            {"volume", "S2S Volume", TYPE_NUMBER, "255", "255", "0", "255", "Speech volume for S2S mode (0-100%)", nullptr, true},
             {"rules",
              "Rules",
              TYPE_STRING,

@@ -142,7 +142,11 @@ namespace UTILS
             {
                 hal->canvas()->setFont(FONT_10);
                 hal->canvas()->setTextColor(TFT_DARKGREY);
+#ifdef CONFIG_BOARD_STICKS3
+                hal->canvas()->drawCenterString("[B hold] CANCEL", dialog_x + DIALOG_WIDTH / 2, dialog_y + DIALOG_HEIGHT - 10);
+#else
                 hal->canvas()->drawCenterString("[DEL] CANCEL", dialog_x + DIALOG_WIDTH / 2, dialog_y + DIALOG_HEIGHT - 10);
+#endif
                 hal->canvas()->setFont(FONT_16);
             }
             bool need_update = true;
@@ -209,7 +213,15 @@ namespace UTILS
                 hal->keyboard()->updateKeysState();
                 if (hal->keyboard()->isPressed())
                 {
-                    if (hal->keyboard()->isKeyPressing(KEY_NUM_LEFT))
+#ifdef CONFIG_BOARD_STICKS3
+                    // two buttons only: UP / DOWN stand in for LEFT / RIGHT between dialog buttons
+                    const bool key_prev = hal->keyboard()->isKeyPressing(KEY_NUM_UP);
+                    const bool key_next = hal->keyboard()->isKeyPressing(KEY_NUM_DOWN);
+#else
+                    const bool key_prev = hal->keyboard()->isKeyPressing(KEY_NUM_LEFT);
+                    const bool key_next = hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT);
+#endif
+                    if (key_prev)
                     {
                         if (key_repeat_check(is_repeat, next_fire_ts, millis()))
                         {
@@ -222,7 +234,7 @@ namespace UTILS
                             need_update = true;
                         }
                     }
-                    else if (hal->keyboard()->isKeyPressing(KEY_NUM_RIGHT))
+                    else if (key_next)
                     {
                         if (key_repeat_check(is_repeat, next_fire_ts, millis()))
                         {
@@ -1134,7 +1146,11 @@ namespace UTILS
                 }
 
                 need_update |= hl_text_render(&hint_ctx,
+#ifdef CONFIG_BOARD_STICKS3
+                                              "[A] OK [B] DOWN [A hold] UP [B hold] BACK",
+#else
                                               "[\u2191][\u2193][\u2190][\u2192] [DEL] [ESC] [ENTER]",
+#endif
                                               5,
                                               hal->canvas()->height() - 9,
                                               TFT_DARKGREY,

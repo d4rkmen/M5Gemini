@@ -136,6 +136,8 @@ namespace UTILS
                         break;
                     }
                     std::string display_value = item.key == "pass" ? "******" : item.value;
+                    if (item.type == SETTINGS::TYPE_NUMBER && item.percent)
+                        display_value = std::to_string(SETTINGS::number_to_percent(item, std::stoi(item.value))) + "%";
 
                     int value_width = hal->canvas()->textWidth(display_value.c_str());
                     int max_value_width = max_width - hal->canvas()->textWidth(item.label.c_str()) - 20;
@@ -538,6 +540,13 @@ namespace UTILS
                     int value = std::stoi(item.value);
                     int min_value = item.min_val.empty() ? 0 : std::stoi(item.min_val);
                     int max_value = item.max_val.empty() ? 999 : std::stoi(item.max_val);
+                    bool edited = false;
+                    if (item.percent)
+                    {
+                        value = SETTINGS::number_to_percent(item, value);
+                        min_value = 0;
+                        max_value = 100;
+                    }
 
 #ifdef CONFIG_BOARD_STICKS3
                     // no digit keys: pick from evenly spaced steps, exact values go through Web setup
@@ -554,14 +563,15 @@ namespace UTILS
                     int res = UTILS::UI::show_select_dialog(hal, item.label, options, current_index);
                     if (res != -1)
                     {
-                        item.value = options[res];
-                        value_changed = true;
+                        value = std::stoi(options[res]);
+                        edited = true;
                     }
-                    break;
+#else
+                    edited = UTILS::UI::show_edit_number_dialog(hal, item.label, value, min_value, max_value);
 #endif
-                    if (UTILS::UI::show_edit_number_dialog(hal, item.label, value, min_value, max_value))
+                    if (edited)
                     {
-                        item.value = std::to_string(value);
+                        item.value = std::to_string(item.percent ? SETTINGS::percent_to_number(item, value) : value);
                         value_changed = true;
                     }
                     break;
