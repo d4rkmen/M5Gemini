@@ -546,7 +546,11 @@ void GeminiApp::drawBattery()
     canvas->drawRect(x, y, w, h, TFT_WHITE);
     canvas->fillRect(x + w, y + 3, 2, h - 6, TFT_WHITE);
 
-    uint32_t color = _batLevel > 50 ? TFT_GREEN : _batLevel > 20 ? TFT_YELLOW : TFT_RED;
+    // green when full, through yellow at half, to red when empty (RGB888)
+    int level = _batLevel > 100 ? 100 : _batLevel;
+    uint32_t red = level >= 50 ? 255 * (100 - level) / 50 : 255;
+    uint32_t green = level >= 50 ? 255 : 255 * level / 50;
+    uint32_t color = (red << 16) | (green << 8);
     int fill = (w - 4) * _batLevel / 100;
     if (fill < 1)
         fill = 1;
@@ -964,8 +968,14 @@ bool GeminiApp::drawAnimation(bool need_update)
     uint32_t timer_now = millis();
     // int x_offset = (_hal->canvas()->width() - _sprite->width()) / 2;
     // int y_offset = (_hal->canvas()->height() - _sprite->height()) / 2;
+#ifdef CONFIG_BOARD_STICKS3
+    // the case covers the outermost pixels of the screen, keep the icon clear of the corner
+    int x_offset = _hal->canvas()->width() - _sprite->width() - 2;
+    int y_offset = 2;
+#else
     int x_offset = _hal->canvas()->width() - _sprite->width() - 1;
     int y_offset = 0;
+#endif
 
     uint32_t full_pos = (timer_now - _anim_context.timer_start) % (_anim_context.duration * 2);
     uint32_t timer_pos = (full_pos % _anim_context.duration) * _anim_context.steps / _anim_context.duration;
