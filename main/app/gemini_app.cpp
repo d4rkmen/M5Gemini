@@ -529,6 +529,7 @@ void GeminiApp::updateBattery()
     bool charging = _hal->isCharging();
     if (level != _batLevel || charging != _batCharging)
     {
+        ESP_LOGI(TAG, "Battery %.2f V, %d%%%s", voltage, level, charging ? ", charging" : "");
         _batLevel = level;
         _batCharging = charging;
         is_rendered = false;

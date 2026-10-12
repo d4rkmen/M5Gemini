@@ -255,21 +255,8 @@ void HalCardputer::init()
 }
 
 #if HAL_USE_BAT
-uint8_t HalCardputer::getBatLevel(float voltage)
-{
-    uint8_t result = 0;
-    if (voltage >= 4.12)
-        result = 100;
-    else if (voltage >= 3.88)
-        result = 75;
-    else if (voltage >= 3.61)
-        result = 50;
-    else if (voltage >= 3.40)
-        result = 25;
-    else
-        result = 0;
-    return result;
-}
+// LiPo discharge curve with interpolation, rather than 25% steps
+uint8_t HalCardputer::getBatLevel(float voltage) { return Battery::get_level(voltage); }
 
 float HalCardputer::getBatVoltage() { return static_cast<float>(_battery->get_voltage()); }
 #endif
