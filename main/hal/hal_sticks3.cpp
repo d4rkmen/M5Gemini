@@ -81,6 +81,14 @@ void HalStickS3::init()
 #if HAL_USE_SPEAKER
     ESP_LOGI(TAG, "init speaker");
     _speaker = new Speaker(this);
+    {
+        // The default x16 output gain is the Cardputer's. Here the ES8311 already plays at
+        // 0 dB into the amplifier (M5Unified uses x1), and x16 clips so hard that the
+        // current peaks reset the chip when running from the battery.
+        auto cfg = _speaker->config();
+        cfg.magnification = 4;
+        _speaker->config(cfg);
+    }
     // amplifier wake-up plus the codec volume ramp; without this the boot sound is swallowed
     delay(200);
 #endif
