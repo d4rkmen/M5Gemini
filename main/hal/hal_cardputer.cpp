@@ -255,10 +255,79 @@ void HalCardputer::init()
 }
 
 #if HAL_USE_BAT
-// LiPo discharge curve with interpolation, rather than 25% steps
-uint8_t HalCardputer::getBatLevel(float voltage) { return Battery::get_level(voltage); }
+// LiPo discharge curve in volts as this board's ADC reads them.
+//  100% is 50 mV under the point where charging stops: with the battery switched
+//       out the charger output reads 4.13-4.15 V here, so full is 4.10 V.
+//    0% is 3.30 V, where the 3.3 V supply can no longer be held up.
+// In between it follows the usual single-cell curve: steep near both ends, nearly
+// flat from 3.7 to 3.9 V, where most of the capacity sits.
+uint8_t HalCardputer::getBatLevel(float voltage)
+{
+    static const struct
+    {
+        float voltage;
+        uint8_t percentage;
+    } curve[] = {{4.10f, 100}, {4.06f, 93}, {4.02f, 86}, {3.98f, 79}, {3.94f, 72}, {3.90f, 65}, {3.87f, 59},
+                 {3.85f, 54},  {3.83f, 48}, {3.81f, 42}, {3.79f, 36}, {3.77f, 30}, {3.75f, 25}, {3.73f, 20},
+                 {3.71f, 15},  {3.68f, 10}, {3.60f, 5},  {3.45f, 2},  {3.30f, 0}};
+    static constexpr int POINTS = sizeof(curve) / sizeof(curve[0]);
 
-float HalCardputer::getBatVoltage() { return static_cast<float>(_battery->get_voltage()); }
+    int level = 0;
+    if (voltage >= curve[0].voltage)
+    {
+        level = 100;
+    }
+    else if (voltage > curve[POINTS - 1].voltage)
+    {
+        for (int i = 0; i < POINTS - 1; i++)
+        {
+            if (voltage >= curve[i + 1].voltage)
+            {
+                const float span = curve[i].voltage - curve[i + 1].voltage;
+                const float part = (voltage - curve[i + 1].voltage) / span;
+                level = static_cast<int>(curve[i + 1].percentage + part * (curve[i].percentage - curve[i + 1].percentage) + 0.5f);
+                break;
+            }
+        }
+    }
+
+    // On the flat part of the curve 10 mV is about 3%, so the last digit would
+    // flicker with ADC noise: only follow changes of 2% or more, and the end stops.
+    static int shown = -1;
+    if (shown < 0 || level == 0 || level == 100 || level >= shown + 2 || level <= shown - 2)
+        shown = level;
+    return static_cast<uint8_t>(shown);
+}
+
+// Averaged over a burst of samples, then smoothed across calls
+float HalCardputer::getBatVoltage()
+{
+    static constexpr int SAMPLES = 16;
+    static constexpr float SMOOTHING = 0.3f;
+
+    float sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < SAMPLES; i++)
+    {
+        const float voltage = _battery->get_voltage();
+        if (voltage > 1.0f)
+        {
+            sum += voltage;
+            count++;
+        }
+    }
+    if (count == 0)
+        return 0.0f;
+
+    static float filtered = 0.0f;
+    const float voltage = sum / count;
+    // a jump of more than 0.1 V is a real change (switch flipped, charger plugged), not noise
+    if (filtered < 1.0f || voltage > filtered + 0.1f || voltage < filtered - 0.1f)
+        filtered = voltage;
+    else
+        filtered += (voltage - filtered) * SMOOTHING;
+    return filtered;
+}
 #endif
 
 void HalCardputer::reboot()
