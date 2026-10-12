@@ -73,8 +73,8 @@ namespace SETTINGS
              "System sound volume (0-100%)",
              [this](SettingItem_t& item)
              {
-                 if (_hal && _hal->speaker())
-                     _hal->speaker()->setVolume(std::stoi(item.value));
+                 if (_hal)
+                     _hal->setSystemVolume(std::stoi(item.value));
              },
              true},
             {"boot_sound", "Boot sound", TYPE_BOOL, "true", "true", "", "", "Play boot sound on startup"},
@@ -857,7 +857,7 @@ namespace SETTINGS
         {
             ESP_LOGI(TAG, "Settings successfully imported from %s", filename.c_str());
             if (_hal && _hal->speaker())
-                _hal->speaker()->setVolume(getNumber("system", "volume"));
+                _hal->setSystemVolume(getNumber("system", "volume"));
         }
         else
         {

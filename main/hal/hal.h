@@ -176,6 +176,16 @@ namespace HAL
 #endif
 #if HAL_USE_SPEAKER
         inline Speaker* speaker() { return _speaker; }
+        // System sound volume (0-255). Applied as the channel volume with the master
+        // left at full, the same way at boot and from the settings: setting the master
+        // as well would apply the value twice. The S2S session sets its own channel.
+        inline void setSystemVolume(uint8_t volume)
+        {
+            if (!_speaker)
+                return;
+            _speaker->setVolume(255);
+            _speaker->setAllChannelVolume(volume);
+        }
 #endif
 #if HAL_USE_MIC
         inline Mic* mic() { return _mic; }

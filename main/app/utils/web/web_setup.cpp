@@ -399,6 +399,8 @@ namespace
                     settings->setNumber(group.nvs_namespace, item.key, number);
                     if (group.nvs_namespace == "system" && item.key == "brightness")
                         s_ctx.hal->display()->setBrightness(number);
+                    if (group.nvs_namespace == "system" && item.key == "volume")
+                        s_ctx.hal->setSystemVolume(number);
                     break;
                 }
 

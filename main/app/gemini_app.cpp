@@ -201,18 +201,20 @@ void GeminiApp::init()
     if (brightness > 0)
         _hal->display()->setBrightness(brightness);
 
-    int volume = _hal->settings()->getNumber("system", "volume");
-    if (volume > 0)
-    {
-        _hal->speaker()->setVolume(255);
-        _hal->speaker()->setChannelVolume(SYSTEM_CHANNEL, volume);
-    }
+    _hal->setSystemVolume(_hal->settings()->getNumber("system", "volume"));
 
     if (_hal->settings()->getBool("system", "boot_sound"))
         _hal->speaker()->playWav(snap_wav_start, snap_wav_end - snap_wav_start, 1, SYSTEM_CHANNEL);
 
     _currentScreen = SCREEN_START;
     is_rendered = false;
+
+    // A restart caused by the supply voltage collapsing leaves no other trace when
+    // the device runs from the battery, away from a serial log
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "Reset reason: %d", (int)reset_reason);
+    if (reset_reason == ESP_RST_BROWNOUT)
+        UTILS::UI::show_error_dialog(_hal, "Low power", "Restarted: the battery could not keep up. Charge it or lower the volume", "OK");
 }
 
 // ═══════════════════════════════════════════════════════════
