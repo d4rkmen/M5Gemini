@@ -18,8 +18,13 @@ namespace HAL
     {
     private:
         PM1* _pm1 = nullptr;
+        uint8_t _speaker_gain = 0;
 
         void _init_power();
+#if HAL_USE_SPEAKER
+        static void _power_monitor_task(void* arg);
+        void _update_speaker_gain(bool log_change);
+#endif
 #if HAL_USE_DISPLAY
         void _init_display();
 #endif

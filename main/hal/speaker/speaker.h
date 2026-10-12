@@ -87,6 +87,11 @@ namespace HAL
         void config(const speaker_config_t& cfg) { _cfg = cfg; }
 
         /**
+         * @brief Change the output multiplier while running
+         */
+        void setMagnification(uint8_t magnification) { _cfg.magnification = magnification; }
+
+        /**
          * @brief Initialize and start the speaker
          */
         bool begin(void);

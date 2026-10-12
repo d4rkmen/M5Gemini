@@ -81,14 +81,9 @@ void HalStickS3::init()
 #if HAL_USE_SPEAKER
     ESP_LOGI(TAG, "init speaker");
     _speaker = new Speaker(this);
-    {
-        // The default x16 output gain is the Cardputer's. Here the ES8311 already plays at
-        // 0 dB into the amplifier (M5Unified uses x1), and x16 clips so hard that the
-        // current peaks reset the chip when running from the battery.
-        auto cfg = _speaker->config();
-        cfg.magnification = 4;
-        _speaker->config(cfg);
-    }
+    // the gain follows the power source from here on
+    _update_speaker_gain(true);
+    xTaskCreate(_power_monitor_task, "pwr_mon", 3072, this, 3, nullptr);
     // amplifier wake-up plus the codec volume ramp; without this the boot sound is swallowed
     delay(200);
 #endif
@@ -111,6 +106,78 @@ uint8_t HalStickS3::getBatLevel(float voltage) { return Battery::get_level(volta
 float HalStickS3::getBatVoltage() { return _pm1 ? _pm1->get_battery_mv() / 1000.0f : 0.0f; }
 
 bool HalStickS3::isCharging() { return _pm1 && _pm1->is_charging(); }
+#endif
+
+#if HAL_USE_SPEAKER
+// Speaker output gain by power source.
+//
+// The speaker driver's default x16 is the Cardputer's. Here the ES8311 already plays
+// at 0 dB into the amplifier, so high gain clips hard and the amplifier draws its peak
+// current for long stretches. The 250 mAh cell cannot supply that together with the
+// WiFi bursts: its voltage sags and the chip takes a brownout reset. Measured on
+// battery at full volume: x4 is stable on a near-full cell, x6 resets.
+// A weaker cell sags sooner, so the gain steps down as it empties.
+static constexpr uint8_t GAIN_USB = 8;
+static constexpr struct
+{
+    uint16_t min_mv;
+    uint8_t gain;
+} GAIN_BATTERY[] = {{3850, 4}, {3700, 3}, {0, 2}};
+static constexpr uint16_t GAIN_HYSTERESIS_MV = 50;
+
+void HalStickS3::_update_speaker_gain(bool log_change)
+{
+    if (!_speaker || !_pm1 || !_pm1->is_initialized())
+        return;
+
+    static uint16_t battery_mv = 0;
+    static uint32_t next_battery_read = 0;
+
+    const bool usb = _pm1->is_usb_powered();
+    uint8_t gain = GAIN_USB;
+    if (!usb)
+    {
+        // the cell voltage moves slowly: read it now and then, the power source every time
+        const uint32_t now = millis();
+        if (battery_mv == 0 || now >= next_battery_read)
+        {
+            const uint16_t mv = _pm1->get_battery_mv();
+            if (mv > 0)
+                battery_mv = mv;
+            next_battery_read = now + 5000;
+        }
+
+        gain = GAIN_BATTERY[0].gain;
+        for (const auto& step : GAIN_BATTERY)
+        {
+            gain = step.gain;
+            // going back up to a louder step needs the voltage clearly above its threshold
+            const uint16_t threshold = step.min_mv + (step.gain > _speaker_gain ? GAIN_HYSTERESIS_MV : 0);
+            if (battery_mv >= threshold)
+                break;
+        }
+    }
+
+    if (gain != _speaker_gain)
+    {
+        _speaker_gain = gain;
+        _speaker->setMagnification(gain);
+        if (log_change)
+            ESP_LOGI(TAG, "speaker gain x%d (%s, battery %d mV)", gain, usb ? "USB" : "battery", battery_mv);
+    }
+}
+
+void HalStickS3::_power_monitor_task(void* arg)
+{
+    auto* self = static_cast<HalStickS3*>(arg);
+    while (true)
+    {
+        // short interval: when the cable is pulled the gain has to come down before
+        // the next loud passage does it for us
+        delay(250);
+        self->_update_speaker_gain(true);
+    }
+}
 #endif
 
 void HalStickS3::setSpeakerAmp(bool enabled)

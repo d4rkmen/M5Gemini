@@ -38,6 +38,8 @@ namespace HAL
         /// Battery voltage in millivolts, 0 on read error
         uint16_t get_battery_mv();
         bool is_charging();
+        /// true while 5 V is present on the USB input
+        bool is_usb_powered();
         void power_off();
 
     private:

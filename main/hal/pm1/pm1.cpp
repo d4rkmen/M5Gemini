@@ -11,6 +11,7 @@
 static const char* TAG = "PM1";
 
 #define PM1_REG_DEVICE_ID 0x00
+#define PM1_REG_PWR_SRC 0x04
 #define PM1_REG_I2C_CFG 0x09
 #define PM1_REG_WDT_CNT 0x0A
 #define PM1_REG_SYS_CMD 0x0C
@@ -23,6 +24,7 @@ static const char* TAG = "PM1";
 #define PM1_REG_VBAT_L 0x22
 
 #define PM1_SYS_CMD_SHUTDOWN 0xA1
+#define PM1_PWR_SRC_5VIN (1 << 0)
 
 namespace HAL
 {
@@ -129,6 +131,14 @@ namespace HAL
         if (!_dev_handle)
             return false;
         return !gpio_read(PM1_GPIO_CHG_STAT);
+    }
+
+    bool PM1::is_usb_powered()
+    {
+        uint8_t src = 0;
+        if (!_read_reg(PM1_REG_PWR_SRC, &src, 1))
+            return false;
+        return src & PM1_PWR_SRC_5VIN;
     }
 
     void PM1::power_off() { _write_reg(PM1_REG_SYS_CMD, PM1_SYS_CMD_SHUTDOWN); }
