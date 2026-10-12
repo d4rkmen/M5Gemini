@@ -315,7 +315,8 @@ void GeminiApp::update()
                 {
                     _userPrompt = _s2s_shared.input_transcript;
                     _s2s_shared.input_transcript.clear();
-                    _s2s_shared.output_transcript.clear();
+                    // output_transcript is left alone: the first words of the reply may
+                    // already be in it by the time this screen notices the model is speaking
                     xSemaphoreGive(_s2s_shared.mutex);
                 }
                 if (!_userPrompt.empty())
