@@ -604,7 +604,7 @@ namespace UTILS
                     else
                     {
                         std::string value = item.value;
-                        int max_length = 50;
+                        int max_length = 255;
                         if (!item.max_val.empty())
                         {
                             max_length = std::stoi(item.max_val);
