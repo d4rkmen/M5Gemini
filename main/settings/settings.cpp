@@ -73,7 +73,7 @@ namespace SETTINGS
         gemini_group.nvs_namespace = "gemini";
         gemini_group.items = {
             back_item,
-            {"api_key", "API key", TYPE_STRING, "", "", "", "", "API key for Google Gemini API"},
+            {"api_key", "API key", TYPE_STRING, "", "", "", "100", "API key for Google Gemini API"},
             {"model",
              "Model name",
              TYPE_STRING,
