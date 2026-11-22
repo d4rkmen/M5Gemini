@@ -218,9 +218,9 @@ const char* GeminiApp::getHintForState() const
     switch (_appState)
     {
     case APP_STATE_S2S_LISTENING:
-        return "[ENTER] SEND [\u2191][\u2193] SCROLL [ESC] STOP";
+        return s2s_is_muted() ? "[ENTER] SEND [SPC] UNMUTE [ESC] STOP" : "[ENTER] SEND [SPC] MUTE [ESC] STOP";
     case APP_STATE_S2S_SPEAKING:
-        return "[ENTER] SKIP [\u2191][\u2193] SCROLL [ESC] STOP";
+        return s2s_is_muted() ? "[ENTER] SKIP [SPC] UNMUTE [ESC] STOP" : "[ENTER] SKIP [SPC] MUTE [ESC] STOP";
     case APP_STATE_S2S_CONNECTING:
     case APP_STATE_S2S_ERROR:
         return "[ESC] CANCEL";
@@ -773,6 +773,15 @@ void GeminiApp::handleResponseScreenInput()
             {
                 startS2S();
             }
+        }
+        else if (_hal->keyboard()->isKeyPressing(KEY_NUM_SPACE))
+        {
+            _hal->keyboard()->waitForRelease(KEY_NUM_SPACE);
+            bool new_muted = !s2s_is_muted();
+            s2s_set_muted(new_muted);
+            if (!new_muted)
+                _hal->playNextSound();
+            is_rendered = false;
         }
     }
     else

@@ -40,3 +40,6 @@ bool s2s_start(HAL::Hal* hal, EventGroupHandle_t event_group, S2SSharedData* sha
                int32_t volume);
 
 void s2s_stop(void);
+
+void s2s_set_muted(bool muted);
+bool s2s_is_muted(void);
