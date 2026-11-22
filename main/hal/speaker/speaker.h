@@ -44,13 +44,13 @@ namespace HAL
         uint8_t magnification = 16;
 
         /// For I2S DMA buffer length (max 1024)
-        size_t dma_buf_len = 256;
+        size_t dma_buf_len = 512;
 
         /// For I2S DMA buffer count
-        size_t dma_buf_count = 4;
+        size_t dma_buf_count = 6;
 
         /// Background task priority
-        uint8_t task_priority = 2;
+        uint8_t task_priority = 6;
 
         /// Background task pinned core
         uint8_t task_pinned_core = 1;

@@ -874,10 +874,15 @@ bool GeminiApp::drawAnimation(bool need_update)
         icon = image_data_mic;
         break;
     }
-    if (icon)
-        _sprite->pushImage(0, 0, 50, 50, icon);
+    if (!icon)
+        return false;
 
     uint32_t timer_now = millis();
+    if (!need_update && (timer_now - _anim_context.last_draw_ms) < 80)
+        return false;
+
+    _sprite->pushImage(0, 0, 50, 50, icon);
+
     // int x_offset = (_hal->canvas()->width() - _sprite->width()) / 2;
     // int y_offset = (_hal->canvas()->height() - _sprite->height()) / 2;
     int x_offset = _hal->canvas()->width() - _sprite->width() - 1;
@@ -899,6 +904,7 @@ bool GeminiApp::drawAnimation(bool need_update)
     if (alpha == _anim_context.last_alpha && need_update == false)
         return false;
     _anim_context.last_alpha = alpha;
+    _anim_context.last_draw_ms = timer_now;
     // mixing sprite with background according to alpha
     for (int py = 0; py < _sprite->height(); py++)
     {
@@ -907,24 +913,28 @@ bool GeminiApp::drawAnimation(bool need_update)
             uint16_t fg = _sprite->readPixel(px, py);                              // foreground (sprite pixel)
             uint16_t bg = _hal->canvas()->readPixel(px + x_offset, py + y_offset); // background pixel
 
-            uint32_t fg24 = _sprite->color16to24(fg);
-            uint8_t fg_r = (fg24 >> 16) & 0xFF;
-            uint8_t fg_g = (fg24 >> 8) & 0xFF;
-            uint8_t fg_b = fg24 & 0xFF;
-
             uint32_t bg24 = _hal->canvas()->color16to24(bg);
             uint8_t bg_r = (bg24 >> 16) & 0xFF;
             uint8_t bg_g = (bg24 >> 8) & 0xFF;
             uint8_t bg_b = bg24 & 0xFF;
 
+            // transparent color
+            if (fg == THEME_COLOR_BG)
+            {
+                _sprite->drawPixel(px, py, _sprite->color888(bg_r, bg_g, bg_b));
+                continue;
+            }
+
+            uint32_t fg24 = _sprite->color16to24(fg);
+            uint8_t fg_r = (fg24 >> 16) & 0xFF;
+            uint8_t fg_g = (fg24 >> 8) & 0xFF;
+            uint8_t fg_b = fg24 & 0xFF;
+
             uint8_t r = (fg_r * alpha + bg_r * (255 - alpha)) / 255;
             uint8_t g = (fg_g * alpha + bg_g * (255 - alpha)) / 255;
             uint8_t b = (fg_b * alpha + bg_b * (255 - alpha)) / 255;
-            // transparent color
-            if (fg == THEME_COLOR_BG)
-                _sprite->drawPixel(px, py, _sprite->color888(bg_r, bg_g, bg_b));
-            else
-                _sprite->drawPixel(px, py, _sprite->color888(r, g, b));
+
+            _sprite->drawPixel(px, py, _sprite->color888(r, g, b));
         }
     }
     _sprite->pushSprite(x_offset, y_offset);

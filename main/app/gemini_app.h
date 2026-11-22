@@ -56,6 +56,7 @@ private:
         uint32_t timer_start = 0;
         uint32_t steps = 1000;
         uint8_t last_alpha = 255;
+        uint32_t last_draw_ms = 0;
     } _anim_context;
     void setState(AppState state);
 

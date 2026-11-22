@@ -6,6 +6,9 @@
 #include "mbedtls/base64.h"
 #include "freertos/ringbuf.h"
 #include "hal_cardputer.h"
+#if HAL_USE_WIFI
+#include "esp_wifi.h"
+#endif
 #include <cmath>
 #include <cstring>
 #include "esp_rom_crc.h"
@@ -20,7 +23,7 @@ static const char* TAG = "S2S";
 #define MIC_BUF_SAMPLES 256
 #define MIC_REC_BLOCKS 3
 #define PCM_SEND_BYTES 3200 // 100ms at 16kHz 16-bit mono
-#define PLAY_CHUNK_SIZE 1024
+#define PLAY_CHUNK_SIZE 2048
 
 #define WS_BUFFER_SIZE 4096
 #define MSG_BUF_CAPACITY (1024 * 28)
@@ -604,12 +607,18 @@ static void s2s_client_task(void* parameter)
         bool mic_warmed = false;
         int warmup_skip = 0;
         size_t pcm_pos = 0;
+        bool user_sent = false;
 
         while (true)
         {
             bits = xEventGroupGetBits(ctx->event_group);
-            if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_MODEL_SPEAKING_BIT | S2S_USER_INTERRUPT_BIT))
+            if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_MODEL_SPEAKING_BIT))
                 break;
+            if (bits & S2S_USER_INTERRUPT_BIT)
+            {
+                user_sent = true;
+                break;
+            }
 
             if (!ctx->hal->mic()->record(s_rec_buf[rec_wr], MIC_BUF_SAMPLES, S2S_MIC_SAMPLE_RATE, false))
                 continue;
@@ -653,6 +662,12 @@ static void s2s_client_task(void* parameter)
             }
         }
 
+        if (user_sent)
+        {
+            xEventGroupClearBits(ctx->event_group, S2S_USER_INTERRUPT_BIT);
+            ESP_LOGI(TAG, "User triggered SEND, ending mic stream");
+        }
+
         // Flush remaining PCM
         if (pcm_pos > 0)
             s2s_send_audio(ctx, s_pcm_buf, pcm_pos);
@@ -666,29 +681,46 @@ static void s2s_client_task(void* parameter)
         if (xEventGroupGetBits(ctx->event_group) & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT))
             break;
 
+        if (user_sent && !(xEventGroupGetBits(ctx->event_group) & (S2S_MODEL_SPEAKING_BIT | S2S_TURN_COMPLETE_BIT)))
+        {
+            EventBits_t wait_bits = xEventGroupWaitBits(
+                ctx->event_group,
+                S2S_MODEL_SPEAKING_BIT | S2S_TURN_COMPLETE_BIT | S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT |
+                    S2S_FATAL_ERROR_BIT | S2S_USER_INTERRUPT_BIT,
+                pdFALSE,
+                pdFALSE,
+                pdMS_TO_TICKS(10000));
+            if (!(wait_bits & S2S_MODEL_SPEAKING_BIT))
+            {
+                if (wait_bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT))
+                    break;
+                continue;
+            }
+        }
+
         // ──────────────────────────────
         // SPEAKING PHASE: drain ring buffer → speaker
         // ──────────────────────────────
 
-        // Pre-buffer: let the ring buffer fill before starting the speaker
+        // Pre-buffer: let the ring buffer fill ~300ms before starting the speaker
         // to absorb network burst variability and prevent early underruns.
-        // {
-        //     const size_t PRE_BUFFER_BYTES = 12000; // ~250ms at 24kHz 16-bit
-        //     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
-        //     while (xTaskGetTickCount() < deadline)
-        //     {
-        //         bits = xEventGroupGetBits(ctx->event_group);
-        //         if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT |
-        //                     S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT))
-        //             break;
-        //         if (bits & S2S_TURN_COMPLETE_BIT)
-        //             break;
-        //         size_t free_bytes = xRingbufferGetCurFreeSize(ctx->spk_ring_buffer);
-        //         if (AUDIO_BUFFER_SIZE - free_bytes >= PRE_BUFFER_BYTES)
-        //             break;
-        //         vTaskDelay(pdMS_TO_TICKS(20));
-        //     }
-        // }
+        {
+            constexpr size_t PRE_BUFFER_BYTES = 14400; // 300ms at 24kHz 16-bit mono
+            TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+            while (xTaskGetTickCount() < deadline)
+            {
+                bits = xEventGroupGetBits(ctx->event_group);
+                if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT |
+                            S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT))
+                    break;
+                if (bits & S2S_TURN_COMPLETE_BIT)
+                    break;
+                size_t free_bytes = xRingbufferGetCurFreeSize(ctx->spk_ring_buffer);
+                if (AUDIO_BUFFER_SIZE - free_bytes >= PRE_BUFFER_BYTES)
+                    break;
+                vTaskDelay(pdMS_TO_TICKS(15));
+            }
+        }
 
         vTaskDelay(pdMS_TO_TICKS(20));
         ctx->hal->speaker()->begin();
@@ -782,6 +814,18 @@ static void s2s_client_task(void* parameter)
                          "Speaker underrun #%lu (rb empty, %lums into playback)",
                          (unsigned long)underruns,
                          (unsigned long)(millis() - play_start));
+                constexpr size_t REBUFFER_BYTES = 4800; // 100ms cushion on underrun
+                TickType_t rebuf_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(400);
+                while (xTaskGetTickCount() < rebuf_deadline)
+                {
+                    bits = xEventGroupGetBits(ctx->event_group);
+                    if (bits & (S2S_STOP_REQUEST_BIT | S2S_ERROR_BIT | S2S_FATAL_ERROR_BIT |
+                                S2S_INTERRUPTED_BIT | S2S_USER_INTERRUPT_BIT | S2S_TURN_COMPLETE_BIT))
+                        break;
+                    if (AUDIO_BUFFER_SIZE - xRingbufferGetCurFreeSize(ctx->spk_ring_buffer) >= REBUFFER_BYTES)
+                        break;
+                    vTaskDelay(pdMS_TO_TICKS(15));
+                }
             }
         }
         ESP_LOGI(TAG,
@@ -905,6 +949,10 @@ bool s2s_start(HAL::Hal* hal,
 
     esp_websocket_register_events(s2s_ctx.ws_client, WEBSOCKET_EVENT_ANY, s2s_ws_event_handler, &s2s_ctx);
 
+#if HAL_USE_WIFI
+    esp_wifi_set_ps(WIFI_PS_NONE);
+#endif
+
     if (esp_websocket_client_start(s2s_ctx.ws_client) != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to start WS client");
@@ -923,6 +971,9 @@ bool s2s_start(HAL::Hal* hal,
     return true;
 
 fail:
+#if HAL_USE_WIFI
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+#endif
     if (s2s_ctx.ws_client)
     {
         esp_websocket_client_stop(s2s_ctx.ws_client);
@@ -977,6 +1028,10 @@ void s2s_stop(void)
     std::string().swap(s2s_ctx.api_key);
     std::string().swap(s2s_ctx.voice);
     std::string().swap(s2s_ctx.rules);
+
+#if HAL_USE_WIFI
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+#endif
 
     ESP_LOGI(TAG, "S2S stopped, heap=%lu", (unsigned long)esp_get_free_heap_size());
 }

@@ -750,7 +750,7 @@ namespace HAL
                 {
                     size_t bytes_written = 0;
                     if (i2s_channel_write(self->_tx_chan,
-                                          self->mix_buf + bytes_total,
+                                          reinterpret_cast<const uint8_t*>(self->mix_buf) + bytes_total,
                                           bytes_to_send - bytes_total,
                                           &bytes_written,
                                           portMAX_DELAY) == ESP_OK)
