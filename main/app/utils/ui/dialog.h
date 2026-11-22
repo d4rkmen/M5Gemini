@@ -72,7 +72,7 @@ namespace UTILS
         show_edit_number_dialog(HAL::Hal* hal, const std::string& title, int& value, int min_value = 0, int max_value = 999);
 
         bool show_edit_string_dialog(
-            HAL::Hal* hal, const std::string& title, std::string& value, bool is_password = false, int max_length = 32);
+            HAL::Hal* hal, const std::string& title, std::string& value, bool is_password = false, int max_length = 128);
 
         /**
          * @brief Show a selection dialog with a scrollable list of items

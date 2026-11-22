@@ -73,14 +73,14 @@ namespace SETTINGS
         gemini_group.nvs_namespace = "gemini";
         gemini_group.items = {
             back_item,
-            {"api_key", "API key", TYPE_STRING, "", "", "", "100", "API key for Google Gemini API"},
+            {"api_key", "API key", TYPE_STRING, "", "", "", "128", "API key for Google Gemini API"},
             {"model",
              "Model name",
              TYPE_STRING,
              "gemini-3.1-flash-live-preview",
              "",
-             "gemini-3.1-flash-live-preview;gemini-2.5-flash-native-audio-preview-12-2025",
-             "100",
+             "gemini-3.1-flash-live-preview;gemini-2.5-flash-native-audio-preview-12-2025;gemini-2.5-flash-native-audio-preview-09-2025",
+             "128",
              "Model name. Live models for S2S voice mode. Hold [Fn] to enter custom"},
             {"voice",
              "Voice",
@@ -626,6 +626,13 @@ namespace SETTINGS
         while (std::getline(infile, line))
         {
             line_num++;
+            if (line_num == 1 && line.size() >= 3 &&
+                static_cast<unsigned char>(line[0]) == 0xEF &&
+                static_cast<unsigned char>(line[1]) == 0xBB &&
+                static_cast<unsigned char>(line[2]) == 0xBF)
+            {
+                line.erase(0, 3);
+            }
             line.erase(0, line.find_first_not_of(" \t\n\r"));
             line.erase(line.find_last_not_of(" \t\n\r") + 1);
 

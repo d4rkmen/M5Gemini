@@ -15,6 +15,7 @@ static const char* TAG = "S2S";
 
 #define S2S_WS_BASE_URL                                                                                                        \
     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+#define S2S_WS_URI_BUF_SIZE 512
 
 #define MIC_BUF_SAMPLES 256
 #define MIC_REC_BLOCKS 3
@@ -879,10 +880,16 @@ bool s2s_start(HAL::Hal* hal,
 
     // Build WebSocket URL with API key
     {
-        std::string url = std::format("{}?key={}", S2S_WS_BASE_URL, api_key);
+        char uri_buf[S2S_WS_URI_BUF_SIZE];
+        int uri_len = snprintf(uri_buf, sizeof(uri_buf), "%s?key=%s", S2S_WS_BASE_URL, api_key.c_str());
+        if (uri_len <= 0 || (size_t)uri_len >= sizeof(uri_buf))
+        {
+            ESP_LOGE(TAG, "WebSocket URI too long (%d bytes, max %d)", uri_len, (int)sizeof(uri_buf) - 1);
+            goto fail;
+        }
 
         esp_websocket_client_config_t ws_cfg = {};
-        ws_cfg.uri = url.c_str();
+        ws_cfg.uri = uri_buf;
         ws_cfg.task_prio = 5;
         ws_cfg.buffer_size = WS_BUFFER_SIZE;
         ws_cfg.reconnect_timeout_ms = 0; // we handle reconnection ourselves
